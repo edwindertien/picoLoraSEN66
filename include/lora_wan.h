@@ -23,8 +23,7 @@ extern int16_t   loraLastRssi;
 extern float     loraLastSnr;
 extern String    loraLastRx;
 
-void        initLoraSPI();   // call from core 0 before WiFi
-void        initLoRa();       // call from core 1
+void        initLoRa();      // call from core 1 (setup1)
 void        loopLoRa();
 void        loraSendNow();
 const char* loraStateStr();

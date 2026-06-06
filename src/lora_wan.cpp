@@ -286,18 +286,8 @@ static void doLoRaWANSend() {
 }
 
 // ── SX1262 hardware init (shared by both modes) ───────────────────────────
-// Call this from core 0, BEFORE WiFi init
-void initLoraSPI() {
-    SPI1.setCS(LORA_CS);
-    SPI1.setSCK(LORA_SCK);
-    SPI1.setTX(LORA_MOSI);
-    SPI1.setRX(LORA_MISO);
-    SPI1.begin(false);
-    Serial.println("[lora] SPI1 initialised on core 0");
-}
-
 static bool initRadioHardware() {
-    // SPI1 already started by initLoraSPI() on core 0
+    // SPI1 already initialised in setup1() before initLoRa() is called
     delay(10);
     loraLogLine("[lora] Calling radio.begin()...");
     int16_t state = radio.begin(868.1, 125.0, 9, 7, 0x12, 14, 8, 0.0, false);

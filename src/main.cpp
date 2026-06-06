@@ -1,10 +1,19 @@
 // ═══════════════════════════════════════════════════════════════════════════
-// SEN66 Monitor — Phase 2 + LoRaWAN/Raw
+// SEN66 Monitor — Phase 2 + LoRa
+// Core 0: WiFi, web server, sensor, serial CLI
+// Core 1: LoRa TX/RX (isolated from CYW43 PIO IRQs)
+//
+// SPI architecture:
+//   CYW43 WiFi → PIO-based SPI (internal, not SPI0/SPI1)
+//   SX1262 LoRa → SPI1 (GP10/11/12, hardware)
+//   SEN66 sensor → I2C0 (GP4/GP5, hardware)
+//   No conflicts between any of these.
 // ═══════════════════════════════════════════════════════════════════════════
 #include <Arduino.h>
 #include <LittleFS.h>
 #include <WiFi.h>
 #include <WebServer.h>
+#include <SPI.h>
 
 #include "globals.h"
 #include "config.h"
@@ -90,9 +99,7 @@ static void handleSerial() {
         Serial.println("[cli] TX queued");
     } else if (cmd == "lora log") {
         String log = loraGetLog(10);
-        // Print each entry on its own line
-        log.replace("[\"", "");
-        log.replace("\"]", "");
+        log.replace("[\"", ""); log.replace("\"]", "");
         log.replace("\",\"", "\n");
         Serial.println(log);
     } else if (cmd.startsWith("debug")) {
@@ -109,17 +116,22 @@ static void handleSerial() {
     }
 }
 
-// ── Setup / Loop ──────────────────────────────────────────────────────────
-// ── Core 1: LoRa runs here, isolated from CYW43 WiFi interrupts ──────────
-// The CYW43 WiFi driver on Pico W conflicts with GPIO interrupts on core 0.
-// Running RadioLib on core 1 keeps the IRQ handlers on separate cores.
-
+// ── Core 1: LoRa ──────────────────────────────────────────────────────────
+// Runs independently of core 0. SPI1 is initialised here on core 1,
+// which is the correct approach — the bus owner should init it.
+// CYW43 uses PIO (not SPI0/SPI1) so there is no hardware conflict.
+// The 5s delay ensures core 0 config/serial is ready before we print.
 void setup1() {
-    // Wait for core 0 to complete WiFi + sensor init
-    // Serial is shared and safe after core 0 has started
-    delay(6000);
-    Serial.println("[core1] LoRa init starting...");
-    Serial.flush();
+    delay(5000);
+    Serial.println("[core1] Starting LoRa...");
+    // Init SPI1 here on core 1 — sole owner of this bus
+    SPI1.setCS(9);          // dummy CS — RadioLib overrides with Module CS pin
+    SPI1.setSCK(10);
+    SPI1.setTX(11);
+    SPI1.setRX(12);
+    SPI1.begin(false);      // false = RadioLib manages CS
+    delay(50);
+    Serial.println("[core1] SPI1 ready");
     initLoRa();
 }
 
@@ -128,7 +140,7 @@ void loop1() {
     delay(50);
 }
 
-// ── Core 0: WiFi, web server, sensor, serial ──────────────────────────────
+// ── Core 0: everything else ───────────────────────────────────────────────
 void setup() {
     Serial.begin(115200);
     delay(2000);
@@ -143,14 +155,12 @@ void setup() {
 
     loadConfig();
     initLog();
-    initLoraSPI();   // SPI1 must be claimed before CYW43 WiFi starts
     startWiFi();
     setupWebServer();
     initSensor();
-    // LoRa init happens on core 1 via setup1()
 
     printHelp();
-    Serial.println("[boot] Core 0 ready — LoRa starting on core 1");
+    Serial.println("[boot] Core 0 ready — LoRa on core 1 starts in 5s");
 }
 
 void loop() {
