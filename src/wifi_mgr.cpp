@@ -15,6 +15,7 @@ void startWiFi() {
         Serial.println();
         if (WiFi.status() == WL_CONNECTED) {
             staMode = true;
+            delay(500);  // let DHCP/ARP settle before server.begin()
             Serial.printf("[wifi] Connected! IP: %s\n",
                 WiFi.localIP().toString().c_str());
             return;

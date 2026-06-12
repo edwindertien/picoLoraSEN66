@@ -19,7 +19,8 @@ from datetime import datetime
 import serial
 import serial.tools.list_ports
 import matplotlib
-matplotlib.use("TkAgg")          # explicit backend — avoids macOS animation stall
+#matplotlib.use("TkAgg")          # explicit backend — avoids macOS animation stall
+matplotlib.use("MacOSX")
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 from matplotlib.gridspec import GridSpec

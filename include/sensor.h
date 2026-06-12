@@ -20,7 +20,7 @@ struct Measurement {
 extern Measurement latest;
 extern SensirionI2cSen66 sen66;
 
-void initSensor();
+void initSensor(bool doFanCleaning = true);
 bool readSensor(Measurement& m);
 
 // Human-readable one-liner for [read] CLI command

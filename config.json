@@ -1,8 +1,0 @@
-{
-  "wifi_ssid": "",
-  "wifi_pass": "",
-  "ap_ssid":   "SEN66-Monitor",
-  "ap_pass":   "sen66pass",
-  "interval":  10,
-  "log_max":   1000
-}

@@ -1,0 +1,14 @@
+{
+  "wifi_ssid": "assortimens",
+  "wifi_pass": "t3mpp4ssw0rd",
+  "ap_ssid":   "SEN66-Monitor",
+  "ap_pass":   "sen66pass",
+  "interval":  10,
+  "log_max":   1000,
+  "fan_cleaning": true,
+  "lora_mode": "disabled",
+  "lora_dev_eui": "0000000000000000",
+  "lora_app_eui": "0000000000000000",
+  "lora_app_key": "00000000000000000000000000000000",
+  "lora_interval_s": 60
+}

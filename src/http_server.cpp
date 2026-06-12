@@ -1,6 +1,5 @@
 #include "http_server.h"
 #include "config.h"
-#include "lora_wan.h"
 #include "sensor.h"
 #include "datalog.h"
 #include "globals.h"
@@ -156,14 +155,6 @@ footer{margin-top:1.2rem;font-size:.68rem;color:var(--muted);
       </div>
       <div class="note"><span id="logrows">—</span> rows · interval <span id="intv">—</span>s</div>
     </div>
-    <div class="card" style="--accent:#f0a500">
-      <div class="label">LoRa · <span id="lora_mode_disp" style="color:var(--muted)">—</span></div>
-      <div class="value" style="font-size:1.05rem;padding-top:.4rem">
-        <span id="lora_state">—</span>
-      </div>
-      <div class="note">↑<span id="lora_uplinks">—</span>  RSSI <span id="lora_rssi">—</span>dBm  SNR <span id="lora_snr">—</span>dB</div>
-      <div class="note" id="lora_rx" style="margin-top:.3rem;word-break:break-all"></div>
-    </div>
   </div>
 </div>
 
@@ -254,7 +245,6 @@ function debouncedGraph() {
 }
 
 document.querySelectorAll('.ch-toggle').forEach(el => {
-  // preventDefault on mousedown stops browser focus/selection flash
   el.addEventListener('mousedown', e => e.preventDefault());
   el.addEventListener('click', e => {
     e.preventDefault();
@@ -402,22 +392,7 @@ async function refreshValues() {
     document.getElementById('nox').textContent    = d.nox_idx.toFixed(0);
     document.getElementById('uptime').textContent = fmtUp(d.uptime_s);
     document.getElementById('logrows').textContent= d.log_rows;
-    document.getElementById('intv').textContent        = d.interval_s;
-    // LoRa card
-    document.getElementById('lora_mode_disp').textContent = d.lora_mode||'disabled';
-    if(d.lora_mode && d.lora_mode !== 'disabled'){
-      const ls = document.getElementById('lora_state');
-      ls.textContent = d.lora_state;
-      ls.className   = (d.lora_state==='send_ok'||d.lora_state==='joined') ? 'good' :
-                        d.lora_state==='joining' ? 'warn' : 'bad';
-      document.getElementById('lora_uplinks').textContent = d.lora_uplinks;
-      document.getElementById('lora_rssi').textContent    = d.lora_rssi;
-      document.getElementById('lora_snr').textContent     = d.lora_snr ? d.lora_snr.toFixed(1) : '—';
-      if(d.lora_last_rx && d.lora_last_rx.length > 0)
-        document.getElementById('lora_rx').textContent = '← ' + d.lora_last_rx;
-    } else {
-      document.getElementById('lora_state').textContent = 'disabled';
-    }
+    document.getElementById('intv').textContent   = d.interval_s;
     document.getElementById('footer').textContent = 'last update: '+new Date().toLocaleTimeString()+' · '+d.wifi_mode+' · '+d.ip;
 
     if (d.pm_saturated) {
@@ -514,27 +489,6 @@ button:hover{opacity:.85}
   <label>Max Log Rows</label>
   <input name="log_max" id="log_max" type="number" min="10" max="5000">
   <p class="hint">Oldest rows removed when limit is reached (ring buffer).</p>
-  <hr style="border-color:var(--border);margin:1.5rem 0">
-  <h2 style="font-size:.9rem;color:var(--muted);margin-bottom:.5rem;font-weight:400">LoRa (EU868)</h2>
-  <label>Mode</label>
-  <select name="lora_mode" id="lora_mode" onchange="loraMode(this.value)"
-    style="width:100%;background:var(--panel);border:1px solid var(--border);
-    border-radius:6px;padding:.55rem .8rem;color:var(--text);font-size:.88rem;outline:none">
-    <option value="disabled">Disabled</option>
-    <option value="raw">Raw (peer-to-peer, no gateway needed)</option>
-    <option value="lorawan">LoRaWAN OTAA (via ChirpStack gateway)</option>
-  </select>
-  <div id="lora_wan_fields" style="display:none">
-    <label>Device EUI <span style="color:var(--muted);font-weight:300">(16 hex, from ChirpStack)</span></label>
-    <input name="lora_dev_eui" id="lora_dev_eui" placeholder="0000000000000000" maxlength="16">
-    <label>Application / Join EUI <span style="color:var(--muted);font-weight:300">(16 hex)</span></label>
-    <input name="lora_app_eui" id="lora_app_eui" placeholder="0000000000000000" maxlength="16">
-    <label>Application Key <span style="color:var(--muted);font-weight:300">(32 hex)</span></label>
-    <input name="lora_app_key" id="lora_app_key" placeholder="00000000000000000000000000000000" maxlength="32">
-  </div>
-  <label>LoRa TX Interval (seconds)</label>
-  <input name="lora_interval_s" id="lora_interval_s" type="number" min="30" max="86400">
-  <p class="hint">Min 30s. EU868 duty cycle 1% — longer is better.</p>
   <button type="submit">Save &amp; Reboot</button>
 </form>
 <div id="msg"></div>
@@ -544,19 +498,9 @@ fetch('/configjson').then(r=>r.json()).then(d=>{
   document.getElementById('wifi_pass').value  = d.wifi_pass||'';
   document.getElementById('ap_ssid').value    = d.ap_ssid||'';
   document.getElementById('ap_pass').value    = d.ap_pass||'';
-  document.getElementById('interval_s').value    = d.interval_s||10;
-  document.getElementById('log_max').value       = d.log_max||1000;
-  document.getElementById('lora_mode').value      = d.lora_mode||'disabled';
-  loraMode(d.lora_mode||'disabled');
-  document.getElementById('lora_dev_eui').value   = d.lora_dev_eui||'';
-  document.getElementById('lora_app_eui').value   = d.lora_app_eui||'';
-  document.getElementById('lora_app_key').value   = d.lora_app_key||'';
-  document.getElementById('lora_interval_s').value= d.lora_interval_s||60;
+  document.getElementById('interval_s').value = d.interval_s||10;
+  document.getElementById('log_max').value    = d.log_max||1000;
 });
-function loraMode(v) {
-  document.getElementById('lora_wan_fields').style.display =
-    v === 'lorawan' ? 'block' : 'none';
-}
 document.getElementById('cfg').addEventListener('submit', async e=>{
   e.preventDefault();
   const body = new URLSearchParams(new FormData(e.target)).toString();
@@ -599,12 +543,6 @@ void handleData() {
     doc["ip"]           = staMode
                           ? WiFi.localIP().toString()
                           : WiFi.softAPIP().toString();
-    doc["lora_state"]   = loraStateStr();
-    doc["lora_uplinks"] = loraUplinkCount;
-    doc["lora_rssi"]    = loraLastRssi;
-    doc["lora_snr"]     = loraLastSnr;
-    doc["lora_mode"]    = cfg.lora_mode;
-    doc["lora_last_rx"] = loraLastRx;
     String out; serializeJson(doc, out);
     sendClose(200, "application/json", out);
 }
@@ -662,13 +600,8 @@ void handleConfigJson() {
     doc["wifi_pass"]  = cfg.wifi_pass;
     doc["ap_ssid"]    = cfg.ap_ssid;
     doc["ap_pass"]    = cfg.ap_pass;
-    doc["interval_s"]      = cfg.interval_s;
-    doc["log_max"]         = cfg.log_max;
-    doc["lora_mode"]       = cfg.lora_mode;
-    doc["lora_dev_eui"]    = cfg.lora_dev_eui;
-    doc["lora_app_eui"]    = cfg.lora_app_eui;
-    doc["lora_app_key"]    = cfg.lora_app_key;
-    doc["lora_interval_s"] = cfg.lora_interval_s;
+    doc["interval_s"] = cfg.interval_s;
+    doc["log_max"]    = cfg.log_max;
     String out; serializeJson(doc, out);
     sendClose(200, "application/json", out);
 }
@@ -679,13 +612,8 @@ void handleConfigPost() {
     if (server.hasArg("wifi_pass")) strlcpy(cfg.wifi_pass, server.arg("wifi_pass").c_str(), sizeof(cfg.wifi_pass));
     if (server.hasArg("ap_ssid"))   strlcpy(cfg.ap_ssid,   server.arg("ap_ssid").c_str(),   sizeof(cfg.ap_ssid));
     if (server.hasArg("ap_pass"))   strlcpy(cfg.ap_pass,   server.arg("ap_pass").c_str(),   sizeof(cfg.ap_pass));
-    if (server.hasArg("interval_s"))   cfg.interval_s      = server.arg("interval_s").toInt();
-    if (server.hasArg("log_max"))      cfg.log_max         = server.arg("log_max").toInt();
-    if (server.hasArg("lora_mode"))    strlcpy(cfg.lora_mode, server.arg("lora_mode").c_str(), sizeof(cfg.lora_mode));
-    if (server.hasArg("lora_dev_eui")) strlcpy(cfg.lora_dev_eui, server.arg("lora_dev_eui").c_str(), sizeof(cfg.lora_dev_eui));
-    if (server.hasArg("lora_app_eui")) strlcpy(cfg.lora_app_eui, server.arg("lora_app_eui").c_str(), sizeof(cfg.lora_app_eui));
-    if (server.hasArg("lora_app_key")) strlcpy(cfg.lora_app_key, server.arg("lora_app_key").c_str(), sizeof(cfg.lora_app_key));
-    if (server.hasArg("lora_interval_s")) cfg.lora_interval_s = server.arg("lora_interval_s").toInt();
+    if (server.hasArg("interval_s"))cfg.interval_s = server.arg("interval_s").toInt();
+    if (server.hasArg("log_max"))   cfg.log_max    = server.arg("log_max").toInt();
     if (saveConfig()) {
         sendClose(200, "text/plain", "OK");
         delay(500);
@@ -693,21 +621,6 @@ void handleConfigPost() {
     } else {
         sendClose(500, "text/plain", "Write failed");
     }
-}
-
-// ── LoRa status + log endpoint ───────────────────────────────────────────
-void handleLoraStatus() {
-    if(DBG_WEB) Serial.println("[web] GET /lorastatus");
-    JsonDocument doc;
-    doc["mode"]     = loraModeStr();
-    doc["state"]    = loraStateStr();
-    doc["uplinks"]  = loraUplinkCount;
-    doc["rssi"]     = loraLastRssi;
-    doc["snr"]      = loraLastSnr;
-    doc["last_rx"]  = loraLastRx;
-    doc["log"]      = serialized(loraGetLog(10));
-    String out; serializeJson(doc, out);
-    sendClose(200, "application/json", out);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -723,7 +636,6 @@ void setupWebServer() {
     server.on("/config",    HTTP_GET,  handleConfigPage);
     server.on("/config",    HTTP_POST, handleConfigPost);
     server.on("/configjson",HTTP_GET,  handleConfigJson);
-    server.on("/lorastatus",HTTP_GET,   handleLoraStatus);
     server.onNotFound([]{
         if(DBG_WEB) Serial.printf("[web] 404: %s\n", server.uri().c_str());
         sendClose(404, "text/plain", "Not found");

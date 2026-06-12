@@ -17,7 +17,7 @@ static void printError(const char* label, int16_t err) {
     Serial.printf("[ERR] %s: %s\n", label, errMsg);
 }
 
-void initSensor() {
+void initSensor(bool doFanCleaning) {
     Wire.setSDA(4);
     Wire.setSCL(5);
     Wire.begin();
@@ -30,10 +30,16 @@ void initSensor() {
     err = sen66.startContinuousMeasurement();
     if (err != NO_ERROR) printError("startMeasurement", err);
 
-    err = sen66.startFanCleaning();
-    if (err != NO_ERROR) printError("fanCleaning", err);
-    Serial.println("[sen66] Fan cleaning (10s)...");
-    delay(11000);
+    if (doFanCleaning) {
+        err = sen66.startFanCleaning();
+        if (err != NO_ERROR) printError("fanCleaning", err);
+        Serial.print("[sen66] Fan cleaning ");
+        for (int i = 0; i < 10; i++) {
+            delay(1000);
+            Serial.print(".");
+        }
+        Serial.println(" done");
+    }
     Serial.println("[sen66] Ready");
 }
 
