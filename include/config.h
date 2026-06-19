@@ -12,13 +12,20 @@ struct Config {
     // ── Sensor ────────────────────────────────────────────────────────────
     bool     fan_cleaning    = true;   // run 10s fan clean on boot
 
+    // ── Node ──────────────────────────────────────────────────────────────
+    char     node_id[16]     = "SEN66-01";
+
     // ── LoRa ──────────────────────────────────────────────────────────────
-    // lora_mode: "disabled" | "lorawan" | "raw"
-    char     lora_mode[12]   = "disabled";
+    float    lora_freq       = 868.1f;  // MHz
+    uint8_t  lora_sf         = 9;       // spreading factor 7-12
+    float    lora_bw         = 125.0f;  // kHz
+    int8_t   lora_power      = 14;      // dBm (2-22)
+    uint16_t lora_interval_s = 60;      // stream interval (min 30s)
+    bool     lora_stream     = false;   // auto-stream on boot
+    // LoRaWAN (Phase B — future)
     char     lora_dev_eui[17]= "0000000000000000";
     char     lora_app_eui[17]= "0000000000000000";
     char     lora_app_key[33]= "00000000000000000000000000000000";
-    uint16_t lora_interval_s = 60;
 };
 
 extern Config cfg;

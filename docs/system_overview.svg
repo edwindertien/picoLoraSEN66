@@ -1,0 +1,63 @@
+<svg width="680" height="600" viewBox="0 0 680 600" xmlns="http://www.w3.org/2000/svg" font-family="Helvetica, Arial, sans-serif">
+<defs>
+<marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+<path d="M2 1L8 5L2 9" fill="none" stroke="#555" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+</marker>
+</defs>
+
+<rect width="680" height="600" fill="#ffffff"/>
+
+<rect x="40" y="40" width="600" height="420" rx="20" fill="#f4f4f4" stroke="#999" stroke-width="1"/>
+<text x="60" y="68" font-size="15" font-weight="bold" fill="#222">Raspberry Pi Pico W</text>
+<text x="60" y="86" font-size="12" fill="#555">RP2040 dual-core</text>
+
+<rect x="64" y="110" width="260" height="160" rx="12" fill="#e6f1fb" stroke="#378ADD" stroke-width="1"/>
+<text x="194" y="138" text-anchor="middle" font-size="14" font-weight="bold" fill="#0c447c">Core 0</text>
+<text x="194" y="156" text-anchor="middle" font-size="12" fill="#185fa5">WiFi · web server · sensor · CLI</text>
+<text x="80" y="182" font-size="11" fill="#185fa5">readSensor() 1Hz</text>
+<text x="80" y="200" font-size="11" fill="#185fa5">handleClient()</text>
+<text x="80" y="218" font-size="11" fill="#185fa5">serial CLI</text>
+<text x="80" y="236" font-size="11" fill="#185fa5">appendLog()</text>
+
+<rect x="356" y="110" width="260" height="160" rx="12" fill="#faece7" stroke="#D85A30" stroke-width="1"/>
+<text x="486" y="138" text-anchor="middle" font-size="14" font-weight="bold" fill="#712b13">Core 1</text>
+<text x="486" y="156" text-anchor="middle" font-size="12" fill="#993c1d">LoRa radio control</text>
+<text x="372" y="182" font-size="11" fill="#993c1d">SPI1.setRX/TX/SCK</text>
+<text x="372" y="200" font-size="11" fill="#993c1d">radio.begin()</text>
+<text x="372" y="218" font-size="11" fill="#993c1d">transmitAndListen()</text>
+<text x="372" y="236" font-size="11" fill="#993c1d">2s ACK window</text>
+
+<line x1="324" y1="190" x2="356" y2="190" stroke="#555" stroke-width="1" marker-end="url(#arrow)"/>
+<text x="340" y="182" text-anchor="middle" font-size="11" fill="#555">FIFO</text>
+
+<rect x="64" y="300" width="150" height="80" rx="10" fill="#e1f5ee" stroke="#1D9E75" stroke-width="1"/>
+<text x="139" y="328" text-anchor="middle" font-size="14" font-weight="bold" fill="#085041">SEN66</text>
+<text x="139" y="346" text-anchor="middle" font-size="11" fill="#0f6e56">I2C0 · GP4/GP5</text>
+<text x="139" y="362" text-anchor="middle" font-size="11" fill="#0f6e56">T · RH · CO2 · VOC · PM</text>
+<line x1="194" y1="270" x2="194" y2="300" stroke="#555" stroke-width="1" marker-end="url(#arrow)"/>
+
+<rect x="234" y="300" width="150" height="80" rx="10" fill="#eeedfe" stroke="#7F77DD" stroke-width="1"/>
+<text x="309" y="328" text-anchor="middle" font-size="14" font-weight="bold" fill="#26215c">LittleFS</text>
+<text x="309" y="346" text-anchor="middle" font-size="11" fill="#534ab7">config.json</text>
+<text x="309" y="362" text-anchor="middle" font-size="11" fill="#534ab7">log.csv ring buffer</text>
+<line x1="194" y1="270" x2="270" y2="300" stroke="#555" stroke-width="1" marker-end="url(#arrow)"/>
+
+<rect x="436" y="300" width="150" height="80" rx="10" fill="#faeeda" stroke="#BA7517" stroke-width="1"/>
+<text x="511" y="328" text-anchor="middle" font-size="14" font-weight="bold" fill="#412402">SX1262</text>
+<text x="511" y="346" text-anchor="middle" font-size="11" fill="#854f0b">SPI1 · GP10/11/12</text>
+<text x="511" y="362" text-anchor="middle" font-size="11" fill="#854f0b">CS3 DIO1·20 RST15 BUSY2</text>
+<line x1="486" y1="270" x2="486" y2="300" stroke="#555" stroke-width="1" marker-end="url(#arrow)"/>
+
+<rect x="64" y="408" width="522" height="36" rx="8" fill="#f1efe8" stroke="#888780" stroke-width="1"/>
+<text x="325" y="430" text-anchor="middle" font-size="12" fill="#444441">Web dashboard · /data /history /config /lorastatus</text>
+<line x1="194" y1="270" x2="200" y2="408" stroke="#555" stroke-width="1" marker-end="url(#arrow)"/>
+
+<rect x="170" y="500" width="340" height="70" rx="12" fill="#eaf3de" stroke="#639922" stroke-width="1"/>
+<text x="340" y="528" text-anchor="middle" font-size="14" font-weight="bold" fill="#173404">LoRa gateway</text>
+<text x="340" y="548" text-anchor="middle" font-size="12" fill="#3b6d11">ChirpStack &#8594; MQTT broker</text>
+
+<line x1="486" y1="380" x2="486" y2="460" stroke="#555" stroke-width="1" fill="none"/>
+<path d="M486 460 L486 480 L340 480 L340 500" fill="none" stroke="#555" stroke-width="1" marker-end="url(#arrow)"/>
+<text x="496" y="475" font-size="11" fill="#555">868.1 MHz</text>
+
+</svg>

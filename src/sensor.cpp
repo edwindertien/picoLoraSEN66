@@ -21,18 +21,43 @@ void initSensor(bool doFanCleaning) {
     Wire.setSDA(4);
     Wire.setSCL(5);
     Wire.begin();
+
+    // I2C scan — confirm SEN66 is actually visible on the bus
+    Serial.println("[sen66] I2C scan...");
+    bool found = false;
+    for (uint8_t addr = 1; addr < 127; addr++) {
+        Wire.beginTransmission(addr);
+        if (Wire.endTransmission() == 0) {
+            Serial.printf("[sen66]   device at 0x%02X\n", addr);
+            if (addr == SEN66_I2C_ADDR_6B) found = true;
+        }
+    }
+    if (!found) {
+        Serial.printf("[sen66] WARNING: nothing at expected addr 0x%02X!\n", SEN66_I2C_ADDR_6B);
+    }
+
     sen66.begin(Wire, SEN66_I2C_ADDR_6B);
 
     int16_t err = sen66.deviceReset();
-    if (err != NO_ERROR) printError("deviceReset", err);
+    if (err != NO_ERROR) { printError("deviceReset", err); }
+    else { Serial.println("[sen66] deviceReset OK"); }
     delay(1200);
 
     err = sen66.startContinuousMeasurement();
-    if (err != NO_ERROR) printError("startMeasurement", err);
+    if (err != NO_ERROR) {
+        printError("startMeasurement", err);
+        Serial.println("[sen66] FATAL: measurement not started — fan/gas sensors will not work");
+    } else {
+        Serial.println("[sen66] startContinuousMeasurement OK");
+    }
 
     if (doFanCleaning) {
         err = sen66.startFanCleaning();
-        if (err != NO_ERROR) printError("fanCleaning", err);
+        if (err != NO_ERROR) {
+            printError("fanCleaning", err);
+        } else {
+            Serial.println("[sen66] startFanCleaning OK — fan should be audible now");
+        }
         Serial.print("[sen66] Fan cleaning ");
         for (int i = 0; i < 10; i++) {
             delay(1000);
@@ -49,7 +74,10 @@ bool readSensor(Measurement& m) {
 
     int16_t err = sen66.getDataReady(padding, dataReady);
     if (err != NO_ERROR) { printError("getDataReady", err); return false; }
-    if (!dataReady) return false;
+    if (!dataReady) {
+        if (DBG_SENSOR) Serial.println("[sensor] dataReady=false, skipping");
+        return false;
+    }
 
     uint16_t pm1Raw, pm25Raw, pm4Raw, pm10Raw;
     int16_t  rhRaw, tempRaw, vocRaw, noxRaw;

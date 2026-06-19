@@ -3,6 +3,7 @@
 #include "sensor.h"
 #include "datalog.h"
 #include "globals.h"
+#include "lora_wan.h"
 #include <LittleFS.h>
 #include <ArduinoJson.h>
 #include <WiFi.h>
@@ -89,7 +90,7 @@ h1 span{color:var(--green);font-family:var(--mono)}
 .sparkcard{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:.8rem}
 .sparkcard h3{font-size:.72rem;letter-spacing:.08em;text-transform:uppercase;
   color:var(--muted);margin-bottom:.5rem}
-.sparkcard svg{width:100%;height:80px;overflow:visible}
+.sparkcard svg{width:100%;height:140px;overflow:visible}
 
 /* ── Nav + footer ── */
 nav{margin-top:1.2rem;display:flex;gap:.6rem;flex-wrap:wrap}
@@ -199,6 +200,17 @@ footer{margin-top:1.2rem;font-size:.68rem;color:var(--muted);
   <div class="sparkgrid" id="sparkgrid"></div>
 </div>
 
+<div class="card" style="--accent:#39d353;margin-top:1rem;max-width:420px">
+  <div class="label">LoRa</div>
+  <div class="value" style="font-size:1.1rem">
+    <span id="loraState">—</span>
+  </div>
+  <div class="note">TX count: <span id="loraTxCount">—</span> ·
+    RSSI: <span id="loraRssi">—</span>dBm · SNR: <span id="loraSnr">—</span>dB</div>
+  <div class="note" id="loraCountdown" style="margin-top:.3rem;font-family:var(--mono)"></div>
+  <div class="note" id="loraAck" style="margin-top:.2rem;word-break:break-all"></div>
+</div>
+
 <nav>
   <a href="/log">⬇ Download Log</a>
   <a href="/clearlog" onclick="return confirm('Clear log?')">🗑 Clear Log</a>
@@ -284,24 +296,27 @@ if (savedN) {
   });
 }
 
-// ── SVG sparkline ─────────────────────────────────────────────────────────
-function makeSpark(values, color, w, h) {
+// ── SVG sparkline with axes ─────────────────────────────────────────────
+function makeSpark(values, color, w, h, labels) {
   const pts = values.filter(v => v !== null);
   if (pts.length < 2) return '<text x="50%" y="50%" text-anchor="middle" fill="#444" font-size="11">no data</text>';
 
   const min = Math.min(...pts);
   const max = Math.max(...pts);
-  const range = max - min || 1;
-  const pad = 4;
-  const W = w - pad*2, H = h - pad*2;
+  const range = (max - min) || 1;
+  // Pad range slightly so min/max points aren't flush against the axes
+  const padFrac = range * 0.08;
+  const yMin = min - padFrac, yMax = max + padFrac, yRange = yMax - yMin;
+
+  const padL = 38, padR = 6, padT = 6, padB = 18;
+  const W = w - padL - padR, H = h - padT - padB;
 
   const coords = values.map((v, i) => {
-    const x = pad + (i / (values.length - 1)) * W;
-    const y = v === null ? null : pad + H - ((v - min) / range) * H;
+    const x = padL + (i / (values.length - 1)) * W;
+    const y = v === null ? null : padT + H - ((v - yMin) / yRange) * H;
     return {x, y, v};
   });
 
-  // Build path with gaps for null
   let path = '';
   let inSeg = false;
   for (const p of coords) {
@@ -310,13 +325,41 @@ function makeSpark(values, color, w, h) {
     else        { path += `L${p.x.toFixed(1)},${p.y.toFixed(1)}`; }
   }
 
-  // Area fill (last valid point back to baseline)
   const first = coords.find(p=>p.y!==null);
   const last  = [...coords].reverse().find(p=>p.y!==null);
   let area = '';
   if (first && last) {
-    area = `M${first.x.toFixed(1)},${(pad+H).toFixed(1)}` + path.substring(1) +
-           `L${last.x.toFixed(1)},${(pad+H).toFixed(1)}Z`;
+    area = `M${first.x.toFixed(1)},${(padT+H).toFixed(1)}` + path.substring(1) +
+           `L${last.x.toFixed(1)},${(padT+H).toFixed(1)}Z`;
+  }
+
+  // ── Y axis: 3 gridlines (top, mid, bottom) with value labels ──────────
+  const yTicks = [yMax, (yMax+yMin)/2, yMin];
+  let yAxis = '';
+  yTicks.forEach(v => {
+    const y = padT + H - ((v - yMin) / yRange) * H;
+    yAxis += `<line x1="${padL}" y1="${y.toFixed(1)}" x2="${padL+W}" y2="${y.toFixed(1)}"
+                stroke="#2a2a3a" stroke-width="1" stroke-dasharray="2,3"/>`;
+    yAxis += `<text x="${padL-5}" y="${(y+3).toFixed(1)}" fill="#888" font-size="9" text-anchor="end">${v.toFixed(1)}</text>`;
+  });
+  // Y axis line itself
+  yAxis += `<line x1="${padL}" y1="${padT}" x2="${padL}" y2="${padT+H}" stroke="#3a3a4a" stroke-width="1"/>`;
+
+  // ── X axis: timeline — start, mid, end labels ──────────────────────────
+  let xAxis = `<line x1="${padL}" y1="${padT+H}" x2="${padL+W}" y2="${padT+H}" stroke="#3a3a4a" stroke-width="1"/>`;
+  if (labels && labels.length > 1) {
+    const fmtT = (s) => {
+      const sec = labels[labels.length-1] - s;  // seconds ago
+      if (sec < 90) return `-${sec}s`;
+      if (sec < 5400) return `-${(sec/60).toFixed(0)}m`;
+      return `-${(sec/3600).toFixed(1)}h`;
+    };
+    const xTickIdx = [0, Math.floor((values.length-1)/2), values.length-1];
+    xTickIdx.forEach(i => {
+      const x = padL + (i / (values.length - 1)) * W;
+      const anchor = i===0 ? 'start' : i===values.length-1 ? 'end' : 'middle';
+      xAxis += `<text x="${x.toFixed(1)}" y="${h-3}" fill="#888" font-size="9" text-anchor="${anchor}">${fmtT(labels[i])}</text>`;
+    });
   }
 
   return `
@@ -326,11 +369,10 @@ function makeSpark(values, color, w, h) {
         <stop offset="100%" stop-color="${color}" stop-opacity="0"/>
       </linearGradient>
     </defs>
+    ${yAxis}
+    ${xAxis}
     <path d="${area}" fill="url(#g${color.replace('#','')})" stroke="none"/>
-    <path d="${path}" fill="none" stroke="${color}" stroke-width="1.5" stroke-linejoin="round"/>
-    <text x="${pad}" y="${h-1}" fill="#666" font-size="9">${min.toFixed(1)}</text>
-    <text x="${(w/2).toFixed(0)}" y="${h-1}" fill="#666" font-size="9" text-anchor="middle">${((min+max)/2).toFixed(1)}</text>
-    <text x="${w-pad}" y="${h-1}" fill="#666" font-size="9" text-anchor="end">${max.toFixed(1)}</text>`;
+    <path d="${path}" fill="none" stroke="${color}" stroke-width="1.5" stroke-linejoin="round"/>`;
 }
 
 // ── Load graph data ───────────────────────────────────────────────────────
@@ -353,7 +395,7 @@ async function loadGraph() {
   const grid = document.getElementById('sparkgrid');
   grid.innerHTML = '';
 
-  const W = 260, H = 80;
+  const W = 280, H = 130;
   for (const [ch, info] of Object.entries(CH)) {
     if (!active[ch] || !data[ch]) continue;
     const card = document.createElement('div');
@@ -366,9 +408,9 @@ async function loadGraph() {
     card.innerHTML = `
       <h3>${info.label} <span style="color:${info.color};float:right">${latestStr}</span></h3>
       <svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">
-        ${makeSpark(data[ch], info.color, W, H)}
+        ${makeSpark(data[ch], info.color, W, H, labels)}
       </svg>
-      <div style="font-size:.65rem;color:#444;text-align:right;margin-top:2px">${labels.length} pts · ${timeLabel}</div>`;
+      <div style="font-size:.65rem;color:#444;text-align:right;margin-top:2px">${labels.length} pts · ${timeLabel} span</div>`;
     grid.appendChild(card);
   }
   if (!grid.children.length)
@@ -417,11 +459,41 @@ async function refreshValues() {
     else if(v<200)setNote('vocnote','moderate','warn');
     else setNote('vocnote','poor','bad');
 
+    // ── LoRa ──────────────────────────────────────────────────────────────
+    document.getElementById('loraState').textContent    = d.lora_state + (d.lora_streaming ? ' · streaming' : '');
+    document.getElementById('loraTxCount').textContent   = d.lora_tx_count;
+    document.getElementById('loraRssi').textContent      = d.lora_rssi;
+    document.getElementById('loraSnr').textContent       = d.lora_snr.toFixed(1);
+    document.getElementById('loraAck').textContent       = d.lora_last_ack ? ('last ACK: '+d.lora_last_ack) : '';
+
+    // Countdown to next streamed TX — recomputed locally every second
+    loraIntervalS  = Math.max(d.lora_interval_s, 30);  // matches firmware duty-cycle floor
+    loraSinceTxMs  = d.lora_since_tx_ms;
+    loraSinceTxRef = Date.now();
+    loraStreamingNow = d.lora_streaming;
+    updateLoraCountdown();
+
   } catch(e) {
     document.getElementById('livebadge').textContent='● '+e.message;
     document.getElementById('livebadge').className='err';
   }
 }
+
+// ── LoRa countdown — ticks every second locally, resynced on each /data poll
+let loraIntervalS = 30, loraSinceTxMs = 0, loraSinceTxRef = Date.now(), loraStreamingNow = false;
+function updateLoraCountdown() {
+  const el = document.getElementById('loraCountdown');
+  if (!loraStreamingNow) { el.textContent = 'stream off'; return; }
+  const elapsedMs = loraSinceTxMs + (Date.now() - loraSinceTxRef);
+  const remainS = Math.max(0, Math.ceil(loraIntervalS - elapsedMs/1000));
+  if (remainS <= 0) {
+    el.textContent = 'transmitting' + '.'.repeat((Math.floor(Date.now()/400)%4));
+  } else {
+    const dots = '.'.repeat(remainS % 4);
+    el.textContent = `next TX in ${remainS}s ${dots}`;
+  }
+}
+setInterval(updateLoraCountdown, 1000);
 
 function setNote(id,txt,cls){const el=document.getElementById(id);el.textContent=txt;el.className='note '+(cls||'');}
 function fmtUp(s){const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),ss=s%60;return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(ss).padStart(2,'0')}`;}
@@ -543,6 +615,18 @@ void handleData() {
     doc["ip"]           = staMode
                           ? WiFi.localIP().toString()
                           : WiFi.softAPIP().toString();
+
+    // LoRa status
+    doc["lora_state"]      = loraStateStr();
+    doc["lora_streaming"]  = loraStreaming;
+    doc["lora_tx_count"]   = loraTxCount;
+    doc["lora_rssi"]       = loraLastRssi;
+    doc["lora_snr"]        = loraLastSnr;
+    doc["lora_last_ack"]   = loraLastAck;
+    doc["lora_interval_s"] = cfg.lora_interval_s;
+    // ms since last TX — frontend computes countdown from this + interval
+    doc["lora_since_tx_ms"]= millis() - loraLastTxMs;
+
     String out; serializeJson(doc, out);
     sendClose(200, "application/json", out);
 }
