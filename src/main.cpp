@@ -17,6 +17,7 @@
 #include "wifi_mgr.h"
 #include "http_server.h"
 #include "lora_wan.h"
+#include "lcd_display.h"
 
 uint8_t  debugLevel    = 0;
 bool     streamEnabled = false;
@@ -192,16 +193,28 @@ void setup() {
     printHelp();
     Serial.println("[boot] Complete — signalling core 1");
     rp2040.fifo.push(0xAA55AA55);
+    // Wait for core 1 to complete radio.begin() before LCD takes SPI1
+    // radio.begin() typically takes ~100ms; 500ms is safe margin
+    delay(500);
+    // LCD init AFTER LoRa core 1 signal — avoids mutex deadlock
+    // during lcd_init() ST7789 reset sequence
+    lcd_display_init();
 }
 
 void loop() {
     server.handleClient();
     handleSerial();
+    lcd_display_handle_buttons();
+    lcd_display_update();
 
     static uint32_t lastReadMs = 0;
     if (millis() - lastReadMs >= 1000) {
         lastReadMs = millis();
         readSensor(latest);
+        if (latest.valid)
+            lcd_push_reading(latest.temp, latest.rh, (float)latest.co2,
+                             latest.voc, latest.nox,
+                             latest.pm_sat ? 0.0f : latest.pm25);
         if (streamEnabled && latest.valid)
             printMeasurement(latest);
     }

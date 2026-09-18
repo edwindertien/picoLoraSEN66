@@ -11,6 +11,8 @@
 
 #include "lora_wan.h"
 #include "config.h"
+#include <pico/mutex.h>
+extern mutex_t spi1_mutex;  // defined in lcd_display.cpp
 #include "sensor.h"
 #include "globals.h"
 #include <RadioLib.h>
@@ -75,6 +77,7 @@ static String buildPayload() {
 
 // ── TX + ACK window ──────────────────────────────────────────────────────
 static void transmitAndListen(const String& payload) {
+    mutex_enter_blocking(&spi1_mutex);
     Serial.printf("[lora] TX %d bytes: %s\n", payload.length(), payload.c_str());
 
     int16_t state = radio.transmit(payload.c_str());
@@ -83,6 +86,7 @@ static void transmitAndListen(const String& payload) {
     if (state != RADIOLIB_ERR_NONE) {
         loraState = LoRaState::TX_FAIL;
         Serial.printf("[lora] TX failed: code %d\n", state);
+        mutex_exit(&spi1_mutex);
         return;
     }
     loraTxCount++;
@@ -116,6 +120,7 @@ static void transmitAndListen(const String& payload) {
     }
 
     radio.standby();
+    mutex_exit(&spi1_mutex);
 }
 
 // ── Apply radio settings ──────────────────────────────────────────────────
