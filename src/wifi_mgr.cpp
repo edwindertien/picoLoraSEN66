@@ -12,7 +12,9 @@
 // after an AP fallback is only reliable via a full reboot — see the
 // "net reconnect" CLI command in main.cpp, which calls rp2040.reboot().
 void startWiFi() {
-    if (strlen(cfg.wifi_ssid) > 0) {
+    if (cfg.wifi_force_ap) {
+        Serial.println("[wifi] wifi_force_ap set — skipping STA entirely");
+    } else if (strlen(cfg.wifi_ssid) > 0) {
         Serial.printf("[wifi] Trying STA: %s\n", cfg.wifi_ssid);
         WiFi.mode(WIFI_STA);
         WiFi.begin(cfg.wifi_ssid, cfg.wifi_pass);

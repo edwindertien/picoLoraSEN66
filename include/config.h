@@ -2,8 +2,8 @@
 #include <Arduino.h>
 
 struct Config {
-    char     wifi_ssid[64]  = "";
-    char     wifi_pass[64]  = "";
+    char     wifi_ssid[64]  = "voorhuis";
+    char     wifi_pass[64]  = "poepplasbanaan";
     char     ap_ssid[32]    = "SEN66-Monitor";
     char     ap_pass[32]    = "sen66pass";
     uint16_t interval_s     = 10;    // logging interval in seconds
@@ -11,6 +11,7 @@ struct Config {
 
     // ── Sensor ────────────────────────────────────────────────────────────
     bool     fan_cleaning    = true;   // run 10s fan clean on boot
+    bool     wifi_force_ap   = false;  // skip STA entirely, always use AP
 
     // ── Node ──────────────────────────────────────────────────────────────
     char     node_id[16]     = "SEN66-01";

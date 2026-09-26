@@ -28,6 +28,7 @@ void loadConfig() {
 
     strlcpy(cfg.node_id, doc["node_id"] | "SEN66-01", sizeof(cfg.node_id));
     cfg.fan_cleaning     = doc["fan_cleaning"]    | true;
+    cfg.wifi_force_ap    = doc["wifi_force_ap"]   | false;
     cfg.lora_freq        = doc["lora_freq"]       | 868.1f;
     cfg.lora_sf          = doc["lora_sf"]         | 9;
     cfg.lora_bw          = doc["lora_bw"]         | 125.0f;
@@ -59,6 +60,7 @@ bool saveConfig() {
     doc["log_max"]         = cfg.log_max;
     doc["node_id"]         = cfg.node_id;
     doc["fan_cleaning"]    = cfg.fan_cleaning;
+    doc["wifi_force_ap"]   = cfg.wifi_force_ap;
     doc["lora_freq"]       = cfg.lora_freq;
     doc["lora_sf"]         = cfg.lora_sf;
     doc["lora_bw"]         = cfg.lora_bw;

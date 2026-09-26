@@ -17,6 +17,7 @@ enum class LcdPage : uint8_t {
     GRAPH_VOC,      // VOC index sparkline
     GRAPH_NOX,      // NOx index sparkline
     GRAPH_PM25,     // PM2.5 sparkline
+    SETTINGS,       // joystick-controlled toggles/values, no text entry
     PAGE_COUNT      // sentinel — keep last
 };
 

@@ -9,8 +9,13 @@
 // 240×135 ST7789V. lcd_init() (in lcd_driver.h) owns SPI1 entirely via its
 // own SPI1.begin() call, with a real hardware RST pulse on GP12.
 //
-// Button B (GP17) only — all other pins would conflict with the LoRa
-// shield once it's reintroduced, so we keep the button restriction now.
+// Button B (GP17) is the only pin with no radio conflict — it always
+// toggles the menu on/off. The rest of the joystick (UP/DOWN/LEFT/RIGHT/
+// PRESS/A on GP2/GP18/GP16/GP20/GP3/GP15) is claimed only while the menu
+// is open, during the same window the radio is already fully suspended —
+// see menu_buttons_claim()/menu_buttons_release() in lcd_buttons.h and
+// screen_on_page()/screen_off() below. LEFT/RIGHT switch pages; on the
+// SETTINGS page, UP/DOWN move the row selection and PRESS/A activates it.
 // ═══════════════════════════════════════════════════════════════════════════
 
 #include "lcd_display.h"
@@ -309,6 +314,105 @@ static void render_lora() {
               loraLastAck.length() > 0 ? OK_COL : DIM, 1);
 }
 
+// ── Settings page — toggles/values only, no text entry ──────────────────
+// UP/DOWN moves the highlighted row, LEFT/RIGHT adjusts a numeric row,
+// PRESS or A activates/toggles the highlighted row. Wired from
+// lcd_display_handle_buttons() only while currentPage == SETTINGS.
+#define SETTINGS_ROW_COUNT 8
+static uint8_t settingsSelected = 0;
+static uint8_t settingsScroll   = 0;
+
+static const char* settings_label(uint8_t idx) {
+    static const char* labels[SETTINGS_ROW_COUNT] = {
+        "LoRa stream", "LoRa send now", "LoRa freq", "LoRa SF",
+        "LoRa power",  "Fan clean",     "WiFi mode", "Reconnect"
+    };
+    return labels[idx];
+}
+
+static void settings_get_value(uint8_t idx, char* buf, size_t buflen, uint16_t* col) {
+    switch (idx) {
+        case 0: snprintf(buf, buflen, "%s", loraStreaming ? "ON" : "OFF");
+                *col = loraStreaming ? OK_COL : DIM; break;
+        case 1: snprintf(buf, buflen, "[press]"); *col = FG; break;
+        case 2: snprintf(buf, buflen, "%.1f MHz", cfg.lora_freq); *col = FG; break;
+        case 3: snprintf(buf, buflen, "SF%u", cfg.lora_sf); *col = FG; break;
+        case 4: snprintf(buf, buflen, "%d dBm", cfg.lora_power); *col = FG; break;
+        case 5: snprintf(buf, buflen, "%s", cfg.fan_cleaning ? "ON" : "OFF");
+                *col = cfg.fan_cleaning ? OK_COL : DIM; break;
+        case 6: snprintf(buf, buflen, "%s", cfg.wifi_force_ap ? "AP" : "STA");
+                *col = FG; break;
+        case 7: snprintf(buf, buflen, "[press]"); *col = FG; break;
+        default: buf[0] = 0; *col = FG; break;
+    }
+}
+
+// PRESS/A — toggle or trigger. Rows 2/3/4 (numeric) are LEFT/RIGHT only.
+static void settings_activate(uint8_t idx) {
+    switch (idx) {
+        case 0: loraStreaming = !loraStreaming; break;
+        case 1: loraSendSensor(); break;
+        case 5: cfg.fan_cleaning  = !cfg.fan_cleaning;  saveConfig(); break;
+        case 6: cfg.wifi_force_ap = !cfg.wifi_force_ap; saveConfig(); break;
+        case 7:
+            Serial.println("[menu] Rebooting to apply network settings...");
+            delay(200);
+            rp2040.reboot();
+            break;
+        default: break;
+    }
+}
+
+// LEFT/RIGHT — adjust a numeric row. dir is -1 or +1.
+static void settings_adjust(uint8_t idx, int dir) {
+    switch (idx) {
+        case 2: {
+            cfg.lora_freq += dir * 0.1f;
+            loraSetFreq(cfg.lora_freq);
+            saveConfig();
+        } break;
+        case 3: {
+            int sf = (int)cfg.lora_sf + dir;
+            if (sf < 7) sf = 7; if (sf > 12) sf = 12;
+            cfg.lora_sf = (uint8_t)sf;
+            loraSetSF(cfg.lora_sf);
+            saveConfig();
+        } break;
+        case 4: {
+            int p = (int)cfg.lora_power + dir;
+            if (p < 2) p = 2; if (p > 22) p = 22;
+            cfg.lora_power = (int8_t)p;
+            loraSetPower(cfg.lora_power);
+            saveConfig();
+        } break;
+        default: break;  // toggle/action rows don't respond to LEFT/RIGHT
+    }
+}
+
+static void render_settings() {
+    draw_header("Settings");
+
+    // Keep the highlighted row within the 6-row visible window
+    if (settingsSelected < settingsScroll) settingsScroll = settingsSelected;
+    if (settingsSelected > settingsScroll + 5) settingsScroll = settingsSelected - 5;
+
+    for (uint8_t i = 0; i < 6; i++) {
+        uint8_t idx = settingsScroll + i;
+        uint16_t tileY = 20 + i * TILE_H;
+        bool sel = (idx == settingsSelected) && (idx < SETTINGS_ROW_COUNT);
+        uint16_t rowBg = sel ? RGB565(25,20,10) : BG;
+
+        for (uint32_t p = 0; p < LCD_W * TILE_H; p++) _tile_buf[p] = rowBg;
+        if (idx < SETTINGS_ROW_COUNT) {
+            char valbuf[24]; uint16_t valcol;
+            settings_get_value(idx, valbuf, sizeof(valbuf), &valcol);
+            tile_str(2,   2, settings_label(idx), sel ? ACCENT : DIM, rowBg, 1);
+            tile_str(150, 2, valbuf, valcol, rowBg, 1);
+        }
+        flush_tile(tileY);
+    }
+}
+
 // ── Screen off — full bus release ────────────────────────────────────────
 // Releases the SPI1 peripheral and tri-states every pin the LCD drives,
 // including GP12 (LCD_RST) which is shared with the SX1262's MISO once
@@ -328,6 +432,7 @@ static void screen_off() {
     pinMode(LCD_SCK,  INPUT);
     pinMode(LCD_MOSI, INPUT);
 
+    menu_buttons_release();  // joystick pins back to inert before radio reclaims them
     lora_request_resume();
 }
 
@@ -353,6 +458,9 @@ static void screen_on_page(LcdPage p) {
             // Kept unconditional — a real problem worth always seeing.
             Serial.println("[lcd] WARNING: radio didn't suspend in time — proceeding anyway");
         }
+        menu_buttons_claim();  // joystick safe now — radio confirmed off these pins
+        settingsSelected = 0;
+        settingsScroll   = 0;
 
         lcd_init();
         mutex_enter_blocking(&spi1_mutex);
@@ -405,39 +513,59 @@ void lcd_display_update() {
         case LcdPage::GRAPH_PM25:
             draw_header("PM2.5 ug/m3");
             render_graph_full(hist_pm25, "PM25", "u",  COL_BLUE);    break;
+        case LcdPage::SETTINGS:   render_settings(); break;
         default: break;
     }
 }
 
-// ── Button handler — Step 2: full cycle including OFF, with timeout ──────
-// SENSOR → WIFI → graphs → OFF → (press) → SENSOR → ...
-// Any press resets the inactivity timer, whether or not the page changes.
+// ── Button handler ────────────────────────────────────────────────────────
+// Button B: the one pin with no radio conflict — always active, always
+// just toggles the menu itself (open at SENSOR / close), regardless of
+// which page is currently showing.
+// Joystick UP/DOWN: page navigation, only read while the menu is open
+// (buttons_poll(screenOn) only claims/reads the joystick pins in that
+// window — see lcd_buttons.h). LEFT/RIGHT and PRESS/A are read and
+// available for future settings pages (value adjust, select/activate)
+// but not yet wired to anything.
 void lcd_display_handle_buttons() {
-    buttons_poll();
+    buttons_poll(screenOn);
     const ButtonState& b = buttons();
 
     if (b.b_edge && millis() - lastBtnMs > BTN_DEBOUNCE_MS) {
         lastBtnMs = millis();
+        if (!screenOn) screen_on_page(LcdPage::SENSOR);
+        else            screen_off();
+        return;
+    }
 
-        if (!screenOn) {
-            // Wake from OFF — always resume at SENSOR
-            screen_on_page(LcdPage::SENSOR);
-            return;
+    if (!screenOn) return;  // joystick only matters while the menu is open
+
+    if (currentPage == LcdPage::SETTINGS) {
+        // UP/DOWN: move the highlighted row. LEFT/RIGHT: adjust a numeric
+        // row. PRESS/A: activate/toggle the highlighted row.
+        if (b.up_edge || b.down_edge) {
+            lastActivityMs = millis();
+            if (b.down_edge && settingsSelected < SETTINGS_ROW_COUNT - 1) settingsSelected++;
+            else if (b.up_edge && settingsSelected > 0)                  settingsSelected--;
+            pageDirty = true;
         }
-
-        lastActivityMs = millis();  // any press while on resets the timer
-
-        // Modulo wrap so incrementing past the LAST page correctly lands
-        // on OFF (enum value 0) instead of skipping straight back to
-        // SENSOR — the previous "if next >= COUNT, reset to SENSOR"
-        // check ran BEFORE the OFF check, making OFF unreachable.
-        uint8_t next = ((uint8_t)currentPage + 1) % (uint8_t)LcdPage::PAGE_COUNT;
-
-        if ((LcdPage)next == LcdPage::OFF) {
-            screen_off();
-        } else {
-            screen_on_page((LcdPage)next);
+        if (b.left_edge)  { lastActivityMs = millis(); settings_adjust(settingsSelected, -1); pageDirty = true; }
+        if (b.right_edge) { lastActivityMs = millis(); settings_adjust(settingsSelected, +1); pageDirty = true; }
+        if (b.press_edge || b.a_edge) {
+            lastActivityMs = millis();
+            settings_activate(settingsSelected);
+            pageDirty = true;
         }
+        return;
+    }
+
+    // Every other page: LEFT/RIGHT switches between top-level pages.
+    if (b.left_edge || b.right_edge) {
+        lastActivityMs = millis();
+        uint8_t count = (uint8_t)LcdPage::PAGE_COUNT - 1;  // exclude OFF
+        uint8_t cur   = (uint8_t)currentPage - 1;          // 0-based, real pages only
+        cur = b.right_edge ? (cur + 1) % count : (cur + count - 1) % count;
+        screen_on_page((LcdPage)(cur + 1));
     }
 }
 
