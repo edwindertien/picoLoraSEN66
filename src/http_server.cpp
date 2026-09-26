@@ -3,7 +3,7 @@
 #include "sensor.h"
 #include "datalog.h"
 #include "globals.h"
-#include "lora_wan.h"
+// #include "lora_wan.h"  // Step 3 will restore this
 #include <LittleFS.h>
 #include <ArduinoJson.h>
 #include <WiFi.h>
@@ -616,16 +616,15 @@ void handleData() {
                           ? WiFi.localIP().toString()
                           : WiFi.softAPIP().toString();
 
-    // LoRa status
-    doc["lora_state"]      = loraStateStr();
-    doc["lora_streaming"]  = loraStreaming;
-    doc["lora_tx_count"]   = loraTxCount;
-    doc["lora_rssi"]       = loraLastRssi;
-    doc["lora_snr"]        = loraLastSnr;
-    doc["lora_last_ack"]   = loraLastAck;
+    // LoRa status — Step 3 will restore this block once lora_wan.h is back
+    doc["lora_state"]      = "disabled";
+    doc["lora_streaming"]  = false;
+    doc["lora_tx_count"]   = 0;
+    doc["lora_rssi"]       = 0;
+    doc["lora_snr"]        = 0.0;
+    doc["lora_last_ack"]   = "";
     doc["lora_interval_s"] = cfg.lora_interval_s;
-    // ms since last TX — frontend computes countdown from this + interval
-    doc["lora_since_tx_ms"]= millis() - loraLastTxMs;
+    doc["lora_since_tx_ms"]= 0;
 
     String out; serializeJson(doc, out);
     sendClose(200, "application/json", out);

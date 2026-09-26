@@ -1,12 +1,17 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // lcd_display.cpp — Waveshare Pico-LCD-1.14 UI for SEN66 monitor
 //
-// 240×135 ST7789V, SPI1 shared with SX1262 LoRa (CS=GP9 vs CS=GP3).
-// spi1_mutex serialises access between core 0 (LCD) and core 1 (LoRa).
+// STEP 2 of the re-integration plan: LCD-only, now with screen timeout
+// and manual OFF cycling via Button B. Still zero radio interaction —
+// screen_off()/screen_on_page() only touch backlight and state for now.
+// Step 3 will add SPI1 release/reclaim + radio suspend/resume inside
+// those two functions, exactly where marked below.
 //
-// Button B (GP17) only — all other pins conflict with LoRa shield.
-// Single press: wake screen (if off) or advance to next page.
-// Auto-off: backlight off after LCD_TIMEOUT_MS of inactivity.
+// 240×135 ST7789V. lcd_init() (in lcd_driver.h) owns SPI1 entirely via its
+// own SPI1.begin() call, with a real hardware RST pulse on GP12.
+//
+// Button B (GP17) only — all other pins would conflict with the LoRa
+// shield once it's reintroduced, so we keep the button restriction now.
 // ═══════════════════════════════════════════════════════════════════════════
 
 #include "lcd_display.h"
@@ -15,7 +20,6 @@
 #include "sensor.h"
 #include "config.h"
 #include "globals.h"
-#include "lora_wan.h"
 #include <WiFi.h>
 #include <pico/mutex.h>
 #include <math.h>
@@ -23,17 +27,18 @@
 extern bool      staMode;
 extern uint32_t  logRowCount;
 
-// ── SPI1 mutex — shared with LoRa on core 1 ──────────────────────────────
+// ── SPI1 mutex — kept in place for when core 1/radio is reintroduced.
+// Harmless for now since core 1 is fully idle in this step.
 mutex_t spi1_mutex;
 
 // ── Timing ────────────────────────────────────────────────────────────────
-#define LCD_TIMEOUT_MS   20000  // backlight off after 20s inactivity
 #define BTN_DEBOUNCE_MS  200
 #define UPDATE_INTERVAL  200    // 5Hz refresh
+#define LCD_TIMEOUT_MS   20000  // backlight off after 20s inactivity
 
 static LcdPage  currentPage      = LcdPage::SENSOR;
 static bool     pageDirty        = true;
-static bool     screenOn         = true;
+static bool     screenOn         = true;   // Step 2: now tracked again
 static uint32_t lastActivityMs   = 0;
 static uint32_t lastUpdateMs     = 0;
 static uint32_t lastBtnMs        = 0;
@@ -70,17 +75,13 @@ void lcd_push_reading(float temp, float rh, float co2,
 #define WARN_COL RGB565(255,180,0)
 #define BAD_COL  COL_RED
 
-// ── Flush a tile row (with mutex) ─────────────────────────────────────────
+// ── Flush a tile row — simple blocking mutex, matching the original
+// confirmed-working version. No claim/release, no hardware reset, no
+// per-call SPI reconfiguration — just the mutex around the raw flush.
 static void flush_tile(uint16_t tile_y) {
     mutex_enter_blocking(&spi1_mutex);
     lcd_flush_tile(tile_y);
     mutex_exit(&spi1_mutex);
-}
-
-// ── Fill entire tile row with one colour ─────────────────────────────────
-static void fill_tile(uint16_t tile_y, uint16_t colour) {
-    for (uint32_t i = 0; i < LCD_W * TILE_H; i++) _tile_buf[i] = colour;
-    flush_tile(tile_y);
 }
 
 // ── Draw one text line into a tile row ───────────────────────────────────
@@ -117,27 +118,24 @@ static uint8_t get_history(const float* src, float* dst) {
 }
 
 // ── Full-screen graph (y=20..134, 115px tall, 240px wide) ────────────────
-// Renders into a static pixel buffer then flushes tile by tile.
-// All data samples are mapped into the full 115px height so the line
-// is continuous and not fragmented across tile boundaries.
-#define GRAPH_Y0    20      // first pixel row of graph area (below header)
-#define GRAPH_H    115      // 135 - 20 = 115px
-#define GRAPH_W    LCD_W    // 240px
+// Renders into a static pixel buffer then flushes tile by tile, so the
+// line is continuous across tile boundaries (Bresenham between samples).
+#define GRAPH_Y0    20
+#define GRAPH_H    115
+#define GRAPH_W    LCD_W
 
-static uint16_t graph_buf[GRAPH_W * GRAPH_H];  // ~55 KB — fits in RAM
+static uint16_t graph_buf[GRAPH_W * GRAPH_H];
 
 static void render_graph_full(const float* src, const char* label,
                                const char* unit, uint16_t colour) {
     static float ordered[LCD_HISTORY];
     uint8_t cnt = get_history(src, ordered);
 
-    // Clear buffer to background
     for (uint32_t i = 0; i < GRAPH_W * GRAPH_H; i++) graph_buf[i] = BG;
 
-    float yMin = 0, yMax = 1;  // defaults if no data
+    float yMin = 0, yMax = 1;
 
     if (cnt >= 2) {
-        // Find min/max with small padding
         float mn = ordered[0], mx = ordered[0];
         for (uint8_t i = 1; i < cnt; i++) {
             if (ordered[i] < mn) mn = ordered[i];
@@ -148,14 +146,12 @@ static void render_graph_full(const float* src, const char* label,
         yMin = mn - pad; yMax = mx + pad;
         float yRange = yMax - yMin;
 
-        // Subtle gridlines at 25/50/75% height
         for (uint8_t g = 1; g <= 3; g++) {
             uint16_t gy = (uint16_t)(GRAPH_H * g / 4);
             for (uint16_t x = 0; x < GRAPH_W; x++)
                 graph_buf[gy * GRAPH_W + x] = RGB565(30,30,30);
         }
 
-        // Pre-compute pixel coords for all samples
         static int16_t px[LCD_HISTORY], py[LCD_HISTORY];
         for (uint8_t i = 0; i < cnt; i++) {
             px[i] = (int16_t)((uint32_t)i * (GRAPH_W - 1) / (cnt - 1));
@@ -165,7 +161,6 @@ static void render_graph_full(const float* src, const char* label,
             py[i] = (int16_t)(GRAPH_H - 1 - norm * (GRAPH_H - 1));
         }
 
-        // Bresenham line between each consecutive pair of points
         for (uint8_t i = 1; i < cnt; i++) {
             int16_t x0 = px[i-1], y0 = py[i-1];
             int16_t x1 = px[i],   y1 = py[i];
@@ -173,7 +168,6 @@ static void render_graph_full(const float* src, const char* label,
             int16_t dy = -abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
             int16_t err = dx + dy;
             while (true) {
-                // Plot pixel (and one below for thickness)
                 if (x0 >= 0 && x0 < GRAPH_W && y0 >= 0 && y0 < GRAPH_H) {
                     graph_buf[y0 * GRAPH_W + x0] = colour;
                     if (y0 + 1 < GRAPH_H)
@@ -187,15 +181,9 @@ static void render_graph_full(const float* src, const char* label,
         }
     }
 
-    // Flush graph_buf to LCD tile by tile, overlaying Y-axis labels
-    // Labels: max at top tile, mid at middle tile, min at bottom tile
-    // Y-axis labels at tile-aligned rows: top=0, middle=60, bottom=100
-    // (GRAPH_H=115, TILE_H=20 — valid tile starts: 0,20,40,60,80,100)
     float labelVals[3]    = { yMax, (yMax+yMin)/2.0f, yMin };
     uint16_t labelRows[3] = { 0, 60, 100 };
 
-    // X-axis: time span label bottom-right
-    // histCount readings at cfg.interval_s seconds each
     uint32_t spanS = (uint32_t)histCount * cfg.interval_s;
     char timeLabel[16];
     if (spanS < 120)       snprintf(timeLabel, sizeof(timeLabel), "%lus", spanS);
@@ -210,16 +198,13 @@ static void render_graph_full(const float* src, const char* label,
             memset(_tile_buf + rows * GRAPH_W, 0,
                    (TILE_H - rows) * GRAPH_W * sizeof(uint16_t));
 
-        // Overlay Y-axis label if this tile row matches a label row
         for (uint8_t li = 0; li < 3; li++) {
             if (ty == labelRows[li]) {
                 char lbuf[12];
                 float v = labelVals[li];
-                // Auto-format: no decimal if large, 1 decimal if medium, 2 if small
                 if (fabsf(v) >= 100.0f)     snprintf(lbuf, sizeof(lbuf), "%.0f", v);
                 else if (fabsf(v) >= 10.0f) snprintf(lbuf, sizeof(lbuf), "%.1f", v);
                 else                         snprintf(lbuf, sizeof(lbuf), "%.2f", v);
-                // Draw semi-transparent dark bg behind label (first 38px wide)
                 for (uint16_t row = 0; row < rows; row++)
                     for (uint16_t col = 0; col < 38; col++)
                         _tile_buf[row * GRAPH_W + col] = RGB565(15,15,15);
@@ -227,10 +212,8 @@ static void render_graph_full(const float* src, const char* label,
             }
         }
 
-        // Overlay time span label on bottom tile, right-aligned
         if (ty + TILE_H >= GRAPH_H) {
-            // Dark bg strip at bottom-right
-            uint16_t lw = strlen(timeLabel) * 6 + 2;  // approx 6px per char at scale 1
+            uint16_t lw = strlen(timeLabel) * 6 + 2;
             for (uint16_t row = rows > 4 ? rows-8 : 0; row < rows; row++)
                 for (uint16_t col = GRAPH_W - lw - 2; col < GRAPH_W; col++)
                     _tile_buf[row * GRAPH_W + col] = RGB565(15,15,15);
@@ -240,23 +223,6 @@ static void render_graph_full(const float* src, const char* label,
 
         flush_tile(GRAPH_Y0 + ty);
     }
-}
-
-// ── Screen off ────────────────────────────────────────────────────────────
-static void screen_off() {
-    screenOn    = false;
-    currentPage = LcdPage::OFF;
-    mutex_enter_blocking(&spi1_mutex);
-    digitalWrite(LCD_BL, LOW);
-    mutex_exit(&spi1_mutex);
-}
-
-static void screen_on_page(LcdPage p) {
-    screenOn       = true;
-    currentPage    = p;
-    pageDirty      = true;
-    lastActivityMs = millis();
-    digitalWrite(LCD_BL, HIGH);
 }
 
 // ── Page renderers ────────────────────────────────────────────────────────
@@ -316,29 +282,55 @@ static void render_wifi() {
     draw_line(120, "sens", buf, DIM);
 }
 
-static void render_lora() {
-    draw_header("LoRa");
-    char buf[32];
+// NOTE: LoRa status page temporarily removed for Step 1 (LCD-only, no
+// radio). Will be reinstated in Step 3 once the radio is reintroduced.
 
-    draw_line(20, "state", loraStateStr(),
-        loraState == LoRaState::TX_OK ? OK_COL :
-        loraState == LoRaState::ERROR ? BAD_COL : FG);
+// ── Screen off — full bus release ────────────────────────────────────────
+// Releases the SPI1 peripheral and tri-states every pin the LCD drives,
+// including GP12 (LCD_RST) which is shared with the SX1262's MISO once
+// the radio is reintroduced in Step 3. Setting pins to INPUT rather than
+// just stopping SPI1 means nothing is left actively driving a shared
+// line while another user of the bus might need it.
+static void screen_off() {
+    screenOn    = false;
+    currentPage = LcdPage::OFF;
+    digitalWrite(LCD_BL, LOW);
 
-    snprintf(buf, sizeof(buf), "%.3f MHz", cfg.lora_freq);
-    draw_line(40, "freq", buf, FG);
+    SPI1.end();
+    pinMode(LCD_CS,   INPUT);
+    pinMode(LCD_DC,   INPUT);
+    pinMode(LCD_RST,  INPUT);
+    pinMode(LCD_SCK,  INPUT);
+    pinMode(LCD_MOSI, INPUT);
 
-    snprintf(buf, sizeof(buf), "SF%u %ddBm", cfg.lora_sf, cfg.lora_power);
-    draw_line(60, "radio", buf, FG);
+    Serial.println("[lcd] Screen off — SPI1 released, all LCD pins set to INPUT");
+    // Step 3 will add: lora_request_resume() here.
+}
 
-    snprintf(buf, sizeof(buf), "%lu", loraTxCount);
-    draw_line(80, "TX#", buf, FG);
+// ── Screen on — full bus reclaim + reinit ────────────────────────────────
+// Waking from OFF re-runs the complete lcd_init() sequence rather than
+// just re-enabling SPI1: every pin was released as an INPUT, so they all
+// need to be reclaimed as OUTPUTs, SPI1 needs a fresh begin(), and the
+// ST7789 controller needs its full reset+config sequence again — not just
+// pin reconfiguration. This is the same lcd_init() called once at boot.
+static void screen_on_page(LcdPage p) {
+    if (!screenOn) {
+        // Step 3 will add: lora_request_suspend() + wait for confirmation
+        // HERE, before touching any pins below.
 
-    draw_line(100, "stream", loraStreaming ? "ON" : "OFF",
-              loraStreaming ? OK_COL : DIM);
+        Serial.println("[lcd] Waking — re-running full lcd_init()...");
+        lcd_init();
+        mutex_enter_blocking(&spi1_mutex);
+        lcd_fill(BG);
+        mutex_exit(&spi1_mutex);
+        Serial.println("[lcd] Wake complete");
+    }
 
-    draw_line(120, "ack",
-              loraLastAck.length() > 0 ? loraLastAck.c_str() : "none",
-              loraLastAck.length() > 0 ? OK_COL : DIM, 1);
+    screenOn       = true;
+    currentPage    = p;
+    pageDirty      = true;
+    lastActivityMs = millis();
+    digitalWrite(LCD_BL, HIGH);
 }
 
 // ── Main update ───────────────────────────────────────────────────────────
@@ -359,7 +351,6 @@ void lcd_display_update() {
     switch (currentPage) {
         case LcdPage::SENSOR:     render_sensor(); break;
         case LcdPage::WIFI:       render_wifi();   break;
-        case LcdPage::LORA:       render_lora();   break;
         case LcdPage::GRAPH_TEMP:
             draw_header("Temp C");
             render_graph_full(hist_temp, "T",    "C",  COL_ORANGE);  break;
@@ -378,28 +369,40 @@ void lcd_display_update() {
         case LcdPage::GRAPH_PM25:
             draw_header("PM2.5 ug/m3");
             render_graph_full(hist_pm25, "PM25", "u",  COL_BLUE);    break;
-        case LcdPage::OFF: break;
         default: break;
     }
 }
 
-// ── Button handler ────────────────────────────────────────────────────────
+// ── Button handler — Step 2: full cycle including OFF, with timeout ──────
+// SENSOR → WIFI → graphs → OFF → (press) → SENSOR → ...
+// Any press resets the inactivity timer, whether or not the page changes.
 void lcd_display_handle_buttons() {
     buttons_poll();
     const ButtonState& b = buttons();
 
     if (b.b_edge && millis() - lastBtnMs > BTN_DEBOUNCE_MS) {
-        lastBtnMs      = millis();
-        lastActivityMs = millis();
+        lastBtnMs = millis();
 
         if (!screenOn) {
-            // Wake screen — go to SENSOR page
+            // Wake from OFF — always resume at SENSOR
             screen_on_page(LcdPage::SENSOR);
             return;
         }
-        // Advance to next page — include OFF so user can blank screen manually
-        uint8_t next = (uint8_t)currentPage + 1;
-        if (next >= (uint8_t)LcdPage::PAGE_COUNT) next = 1; // wrap to SENSOR
+
+        lastActivityMs = millis();  // any press while on resets the timer
+
+        // Modulo wrap so incrementing past the LAST page correctly lands
+        // on OFF (enum value 0) instead of skipping straight back to
+        // SENSOR — the previous "if next >= COUNT, reset to SENSOR"
+        // check ran BEFORE the OFF check, making OFF unreachable.
+        uint8_t next = ((uint8_t)currentPage + 1) % (uint8_t)LcdPage::PAGE_COUNT;
+
+        // LORA page isn't rendered yet (Step 3 will restore it) — skip
+        // straight over it so the cycle doesn't land on a blank page.
+        if ((LcdPage)next == LcdPage::LORA) {
+            next = ((uint8_t)LcdPage::LORA + 1) % (uint8_t)LcdPage::PAGE_COUNT;
+        }
+
         if ((LcdPage)next == LcdPage::OFF) {
             screen_off();
         } else {
@@ -411,17 +414,15 @@ void lcd_display_handle_buttons() {
 // ── Init ──────────────────────────────────────────────────────────────────
 void lcd_display_init() {
     mutex_init(&spi1_mutex);
+    buttons_init();  // interrupt-driven — see lcd_buttons.h
 
-    pinMode(BTN_B, INPUT_PULLUP);
-
-    lcd_init();
-
+    lcd_init();     // owns SPI1 entirely, hardware RST pulse on GP12
     mutex_enter_blocking(&spi1_mutex);
     lcd_fill(BG);
     mutex_exit(&spi1_mutex);
 
-    lastActivityMs = millis();
     pageDirty      = true;
     screenOn       = true;
-    Serial.println("[lcd] Initialised — B=next page, auto-off 20s");
+    lastActivityMs = millis();
+    Serial.println("[lcd] Initialised — B cycles pages, 20s timeout to OFF (Step 2)");
 }

@@ -1,6 +1,9 @@
 #pragma once
 #include <Arduino.h>
 
+// Step 1 of re-integration plan: LCD-only baseline, no radio bus-sharing
+// logic in this file. See main.cpp for the overall staged plan.
+
 // ── Pages ─────────────────────────────────────────────────────────────────
 // Button B (GP17) cycles forward through pages
 enum class LcdPage : uint8_t {

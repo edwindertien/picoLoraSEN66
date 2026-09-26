@@ -12,6 +12,7 @@
 #include "lora_wan.h"
 #include "config.h"
 #include <pico/mutex.h>
+#include <hardware/resets.h>
 extern mutex_t spi1_mutex;  // defined in lcd_display.cpp
 #include "sensor.h"
 #include "globals.h"
@@ -48,6 +49,19 @@ static volatile int8_t  setPowVal    = 14;
 uint32_t loraLastTxMs = 0;
 #define lastTxMs loraLastTxMs
 
+// ── Coarse-grained bus handoff state ───────────────────────────────────────
+// See lora_wan.h for the rationale — one side owns SPI1 entirely at a time.
+static volatile bool suspendRequested = false;
+static volatile bool suspended        = false;
+
+void lora_request_suspend() { suspendRequested = true; }
+void lora_request_resume()  { suspendRequested = false; }
+#ifdef LORA_FULLY_DISABLED
+bool lora_is_suspended() { return true; }  // radio never active — always "suspended"
+#else
+bool lora_is_suspended() { return suspended; }
+#endif
+
 // ── Duty cycle guard ──────────────────────────────────────────────────────
 static bool dutyOk() {
     if (millis() - lastTxMs < MIN_INTERVAL_MS) {
@@ -76,8 +90,32 @@ static String buildPayload() {
 }
 
 // ── TX + ACK window ──────────────────────────────────────────────────────
+// ── Full SPI1 claim/release for the radio ────────────────────────────────
+// Rather than assuming SPI1 is left in a usable state by the LCD (core 0),
+// fully tear down and rebuild the peripheral's pin assignment before every
+// radio operation, and release it again afterward. Mirrors lcd_spi_claim()/
+// lcd_spi_release() in lcd_display.cpp — neither side trusts shared state.
+static void radio_spi_claim() {
+    pinMode(9, OUTPUT);
+    digitalWrite(9, HIGH);
+
+    // True hardware reset — see lcd_spi_claim() in lcd_display.cpp for why
+    // SPI1.end()/begin() alone isn't trusted to fully clear peripheral state.
+    reset_block(RESETS_RESET_SPI1_BITS);
+    unreset_block_wait(RESETS_RESET_SPI1_BITS);
+
+    SPI1.setRX(12);   // MISO
+    SPI1.setTX(11);   // MOSI
+    SPI1.setSCK(10);  // SCK
+    SPI1.begin(false);
+}
+static void radio_spi_release() {
+    SPI1.end();
+}
+
 static void transmitAndListen(const String& payload) {
     mutex_enter_blocking(&spi1_mutex);
+    radio_spi_claim();
     Serial.printf("[lora] TX %d bytes: %s\n", payload.length(), payload.c_str());
 
     int16_t state = radio.transmit(payload.c_str());
@@ -86,6 +124,7 @@ static void transmitAndListen(const String& payload) {
     if (state != RADIOLIB_ERR_NONE) {
         loraState = LoRaState::TX_FAIL;
         Serial.printf("[lora] TX failed: code %d\n", state);
+        radio_spi_release();
         mutex_exit(&spi1_mutex);
         return;
     }
@@ -120,6 +159,8 @@ static void transmitAndListen(const String& payload) {
     }
 
     radio.standby();
+    radio.clearDio1Action();  // startReceive() above may have (re-)attached it
+    radio_spi_release();
     mutex_exit(&spi1_mutex);
 }
 
@@ -166,48 +207,116 @@ const char* loraStateStr() {
 
 // ── Init (called from core 1 setup1, after SPI1.begin()) ─────────────────
 void initLoRa() {
+#ifdef LORA_FULLY_DISABLED
+    Serial.println("[lora] LORA_FULLY_DISABLED — skipping entirely, SPI1 untouched by core 1");
+    loraState = LoRaState::DISABLED;
+    return;
+#endif
     Serial.println("[lora] init...");
+    // Full init under mutex — lcd_display_init() may run concurrently on core 0
+    mutex_enter_blocking(&spi1_mutex);
+    radio_spi_claim();
     int16_t state = radio.begin();
     if (state != RADIOLIB_ERR_NONE) {
+        radio_spi_release();
+        mutex_exit(&spi1_mutex);
         Serial.printf("[lora] SX1262 failed: %d\n", state);
         loraState = LoRaState::ERROR;
         return;
     }
-    Serial.println("[lora] SX1262 OK");
     radio.setDio2AsRfSwitch(true);
-
-    // Apply config defaults
-    applyFreq(cfg.lora_freq);
-    applySF(cfg.lora_sf);
+    radio.setFrequency(cfg.lora_freq);
+    radio.setSpreadingFactor(cfg.lora_sf);
     radio.setBandwidth(cfg.lora_bw);
-    applyPower(cfg.lora_power);
-    radio.setSyncWord(0x12);  // private network (not LoRaWAN 0x34)
+    radio.setOutputPower(cfg.lora_power);
+    radio.setSyncWord(0x12);
+    // Detach any DIO1 interrupt RadioLib may attach internally (e.g. via
+    // startReceive()). GP20/DIO1 is a shared pin with implications beyond
+    // our own mutex — an ISR firing asynchronously wouldn't be caught by
+    // any of our SPI1 claim/release or CS-deassertion logic, since it
+    // doesn't go through a normal transaction at all. Never re-added
+    // after lora_wan.cpp was rewritten from scratch — untested against
+    // the current LCD conflict.
+    radio.clearDio1Action();
+    radio_spi_release();
+    mutex_exit(&spi1_mutex);
 
-    loraState  = LoRaState::IDLE;
-    lastTxMs   = millis() - MIN_INTERVAL_MS;  // allow immediate first TX
-    loraStreaming = cfg.lora_stream;
+    loraState     = LoRaState::IDLE;
+    lastTxMs      = millis() - MIN_INTERVAL_MS;
+    loraStreaming  = cfg.lora_stream;
+    Serial.println("[lora] SX1262 OK");
     Serial.printf("[lora] Ready  %.3fMHz  SF%u  BW%.0fkHz  %ddBm\n",
         cfg.lora_freq, cfg.lora_sf, cfg.lora_bw, cfg.lora_power);
 }
 
 // ── Loop (called from core 1 loop1) ──────────────────────────────────────
 void loopLoRa() {
+#ifdef LORA_FULLY_DISABLED
+    return;  // core 1 never touches SPI1 — pure isolation test
+#endif
+    // ── Coarse-grained bus handoff ─────────────────────────────────────────
+    // If the LCD wants the bus, sleep the radio and fully release SPI1,
+    // then do nothing else until asked to resume. This only happens on
+    // rare events (button press / screen timeout), never per-transaction,
+    // so re-initialising the radio fully on resume is cheap and reliable.
+    if (suspendRequested) {
+        if (!suspended) {
+            mutex_enter_blocking(&spi1_mutex);
+            radio_spi_claim();
+            radio.sleep();
+            radio.clearDio1Action();
+            radio_spi_release();
+            mutex_exit(&spi1_mutex);
+            suspended = true;
+            Serial.println("[lora] Suspended — bus released for LCD");
+        }
+        return;  // stay idle, touch nothing, until resume is requested
+    }
+    if (suspended) {
+        // Resume requested — fully re-initialise the radio fresh.
+        // Simpler and more robust than trying to wake from sleep() with
+        // partial state; this only happens when the user closes the menu.
+        Serial.println("[lora] Resuming — reclaiming bus");
+        initLoRa();
+        suspended = false;
+        return;
+    }
+
     if (loraState == LoRaState::ERROR || loraState == LoRaState::DISABLED) return;
 
-    // Apply pending settings from CLI
-    if (setFreqReq) { setFreqReq = false; applyFreq(setFreqVal); }
-    if (setSFReq)   { setSFReq   = false; applySF(setSFVal); }
-    if (setPowReq)  { setPowReq  = false; applyPower(setPowVal); }
+    // Apply pending settings from CLI — all need mutex
+    if (setFreqReq) {
+        setFreqReq = false;
+        mutex_enter_blocking(&spi1_mutex);
+        radio_spi_claim(); applyFreq(setFreqVal); radio_spi_release();
+        mutex_exit(&spi1_mutex);
+    }
+    if (setSFReq) {
+        setSFReq = false;
+        mutex_enter_blocking(&spi1_mutex);
+        radio_spi_claim(); applySF(setSFVal); radio_spi_release();
+        mutex_exit(&spi1_mutex);
+    }
+    if (setPowReq) {
+        setPowReq = false;
+        mutex_enter_blocking(&spi1_mutex);
+        radio_spi_claim(); applyPower(setPowVal); radio_spi_release();
+        mutex_exit(&spi1_mutex);
+    }
 
     // One-shot test TX
     if (txTestReq) {
         txTestReq = false;
         float savedFreq = cfg.lora_freq;
-        applyFreq(txTestFreq);
+        mutex_enter_blocking(&spi1_mutex);
+        radio_spi_claim(); applyFreq(txTestFreq); radio_spi_release();
+        mutex_exit(&spi1_mutex);
         char buf[128];
         snprintf(buf, sizeof(buf), "<%s>%s", cfg.node_id, txTestMsg.c_str());
         transmitAndListen(String(buf));
-        applyFreq(savedFreq);  // restore
+        mutex_enter_blocking(&spi1_mutex);
+        radio_spi_claim(); applyFreq(savedFreq); radio_spi_release();  // restore
+        mutex_exit(&spi1_mutex);
         return;
     }
 

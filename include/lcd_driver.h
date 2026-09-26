@@ -251,8 +251,14 @@ inline void tile_str(uint16_t x, uint16_t ty, const char* s, uint16_t fg, uint16
 }
 
 // ---- Initialisation ----------------------------------------
+// RESTORED to the original, confirmed-working version: lcd_init() owns
+// SPI1 entirely (calls its own begin()) and drives a real hardware RST
+// pulse on GP12. This is the exact configuration that reliably rendered
+// content on every page (sensor/wifi/lora/graphs) before any radio
+// bus-sharing work began. Going back to this known-good baseline first,
+// then re-integrating the radio step by step with verification at each
+// stage, rather than the "big bang" coarse-grained architecture.
 inline void lcd_init() {
-    // Pins
     pinMode(LCD_CS,  OUTPUT); digitalWrite(LCD_CS,  HIGH);
     pinMode(LCD_DC,  OUTPUT); digitalWrite(LCD_DC,  HIGH);
     pinMode(LCD_RST, OUTPUT); digitalWrite(LCD_RST, HIGH);
@@ -264,7 +270,7 @@ inline void lcd_init() {
     SPI1.setRX(PIN_SPI1_MISO);  // default MISO, not connected, harmless
     SPI1.begin();
 
-    // Reset
+    // Hardware reset
     digitalWrite(LCD_RST, LOW);  delay(10);
     digitalWrite(LCD_RST, HIGH); delay(120);
 

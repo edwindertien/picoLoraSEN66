@@ -1,14 +1,20 @@
 // ═══════════════════════════════════════════════════════════════════════════
-// SEN66 Monitor — Phase 2 + Plain LoRa
-// Core 0: WiFi, web, sensor, serial CLI
-// Core 1: LoRa TX/RX (SPI1 owned entirely by core 1)
+// SEN66 Monitor — Step 1 of LCD/LoRa re-integration plan
+// Core 0: WiFi, web, sensor, serial CLI, LCD (always on, no bus sharing)
+// Core 1: COMPLETELY IDLE — radio not touched at all in this step.
+//
+// Plan: (1) confirm LCD works reliably and permanently on its own — this
+// step. (2) add screen timeout + bus release/reclaim, LCD-only, no radio
+// yet. (3) reintroduce the radio carefully, one change at a time.
+//
+// LoRa CLI/status code from the working build is preserved below as
+// comments marking exactly where it goes back in during Step 3.
 // ═══════════════════════════════════════════════════════════════════════════
 #include <Arduino.h>
 #include <LittleFS.h>
 #include <WiFi.h>
 #include <WebServer.h>
 #include <SPI.h>
-#include <RadioLib.h>
 
 #include "globals.h"
 #include "config.h"
@@ -16,7 +22,6 @@
 #include "datalog.h"
 #include "wifi_mgr.h"
 #include "http_server.h"
-#include "lora_wan.h"
 #include "lcd_display.h"
 
 uint8_t  debugLevel    = 0;
@@ -24,44 +29,22 @@ bool     streamEnabled = false;
 bool     staMode       = false;
 uint32_t lastLogTime   = 0;
 
-// ── SX1262 radio object — owned by core 1 ────────────────────────────────
-// Waveshare Pico-LoRa-SX1262: CS=3, DIO1=20, RST=15, BUSY=2
-SX1262 radio = new Module(3, 20, 15, 2, SPI1);
-
-// ── Core 1: LoRa ──────────────────────────────────────────────────────────
-void setup1() {
-    rp2040.fifo.pop();          // wait for core 0 to complete
-    SPI1.setRX(12);
-    SPI1.setTX(11);
-    SPI1.setSCK(10);
-    SPI1.begin(false);          // RadioLib manages CS
-    initLoRa();                 // init radio + apply config settings
-}
-
-void loop1() {
-    loopLoRa();
-    sleep_ms(50);
-}
+// ── Core 1: fully idle — radio not reintroduced yet (Step 1) ─────────────
+void setup1() { }
+void loop1()  { sleep_ms(1000); }
 
 // ── Serial CLI ────────────────────────────────────────────────────────────
 static void printHelp() {
     Serial.println("─────────────────────────────────────────────");
-    Serial.println(" SEN66 Serial CLI");
+    Serial.println(" SEN66 Serial CLI  [Step 1: LCD-only, no radio]");
     Serial.println("  help              — this message");
     Serial.println("  status            — system status");
     Serial.println("  read              — single sensor reading");
     Serial.println("  stream            — toggle CSV serial stream");
     Serial.println("  debug <n>         — 0=off 1=web 2=sensor 4=lora");
-    Serial.println(" ── LoRa ──────────────────────────────────────");
-    Serial.println("  lora status       — radio state, last ACK");
-    Serial.println("  lora send         — TX one sensor packet now");
-    Serial.println("  lora stream on    — auto TX at interval");
-    Serial.println("  lora stream off   — stop auto TX");
-    Serial.println("  lora test <freq> <msg>  — one-shot test TX");
-    Serial.println("    e.g.  lora test 868.75 hello world");
-    Serial.println("  lora freq <mhz>   — set frequency");
-    Serial.println("  lora sf <7-12>    — set spreading factor");
-    Serial.println("  lora power <dbm>  — set TX power (2-22)");
+    // Step 3 will restore:
+    //  lora status / lora send / lora stream on|off / lora test <freq> <msg>
+    //  lora freq / lora sf / lora power
     Serial.println("─────────────────────────────────────────────");
 }
 
@@ -75,26 +58,8 @@ static void printStatus() {
     Serial.printf(" Flash:   %u/%u bytes\n", fs.usedBytes, fs.totalBytes);
     Serial.printf(" Log:     %lu rows\n", logRowCount);
     Serial.printf(" Debug:   %u\n", debugLevel);
-    Serial.println(" ── LoRa ──────────────────────────────────────");
-    Serial.printf(" State:   %s\n", loraStateStr());
-    Serial.printf(" Node:    %s\n", cfg.node_id);
-    Serial.printf(" Freq:    %.3f MHz\n", cfg.lora_freq);
-    Serial.printf(" SF/BW:   SF%u / %.0f kHz\n", cfg.lora_sf, cfg.lora_bw);
-    Serial.printf(" Power:   %d dBm\n", cfg.lora_power);
-    Serial.printf(" Stream:  %s  interval=%us\n",
-        loraStreaming ? "ON" : "OFF", cfg.lora_interval_s);
-    Serial.printf(" TX count:%lu\n", loraTxCount);
-    if (loraStreaming) {
-        uint32_t intervalMs = max((uint32_t)cfg.lora_interval_s * 1000UL, 30000UL);
-        uint32_t elapsed = millis() - loraLastTxMs;
-        if (elapsed < intervalMs)
-            Serial.printf(" Next TX: %lus\n", (intervalMs - elapsed) / 1000);
-        else
-            Serial.println(" Next TX: due now");
-    }
-    if (loraLastAck.length() > 0)
-        Serial.printf(" Last ACK: \"%s\"  RSSI=%d  SNR=%.1f\n",
-            loraLastAck.c_str(), loraLastRssi, loraLastSnr);
+    // Step 3 will restore the LoRa status block here (state, freq, SF/BW,
+    // power, TX count, stream/countdown, last ACK) and the LCD flush stats.
     Serial.println("─────────────────────────────────────────────");
 }
 
@@ -123,63 +88,21 @@ static void handleSerial() {
             Serial.printf("[cli] Debug → %u\n", debugLevel);
         }
     }
-    // ── LoRa commands ─────────────────────────────────────────────────────
-    else if (cmdL == "lora status") {
-        printStatus();  // status includes LoRa section
-    }
-    else if (cmdL == "lora send") {
-        loraSendSensor();
-        Serial.println("[cli] Sensor TX queued");
-    }
-    else if (cmdL == "lora stream on") {
-        loraStreaming = true;
-        Serial.printf("[cli] LoRa stream ON — interval %us\n", cfg.lora_interval_s);
-    }
-    else if (cmdL == "lora stream off") {
-        loraStreaming = false;
-        Serial.println("[cli] LoRa stream OFF");
-    }
-    else if (cmdL.startsWith("lora test ")) {
-        // Format: lora test <freq> <message...>
-        String rest = cmd.substring(10);  // preserve case for message
-        int sp = rest.indexOf(' ');
-        if (sp < 0) { Serial.println("[cli] Usage: lora test <freq> <message>"); return; }
-        float freq = rest.substring(0, sp).toFloat();
-        String msg = rest.substring(sp + 1);
-        if (freq < 100.0 || freq > 1000.0) {
-            Serial.println("[cli] Invalid frequency"); return;
-        }
-        Serial.printf("[cli] Test TX @ %.3f MHz: %s\n", freq, msg.c_str());
-        loraSendTest(freq, msg);
-    }
-    else if (cmdL == "lora freq") {
-        Serial.printf("[lora] Current frequency: %.3f MHz\n", cfg.lora_freq);
-    }
-    else if (cmdL.startsWith("lora freq ")) {
-        float freq = cmdL.substring(10).toFloat();
-        if (freq < 100.0 || freq > 1000.0) { Serial.println("[cli] Invalid frequency"); return; }
-        cfg.lora_freq = freq;
-        loraSetFreq(freq);
-    }
-    else if (cmdL.startsWith("lora sf ")) {
-        uint8_t sf = (uint8_t)cmdL.substring(8).toInt();
-        cfg.lora_sf = sf;
-        loraSetSF(sf);
-    }
-    else if (cmdL.startsWith("lora power ")) {
-        int8_t pwr = (int8_t)cmdL.substring(11).toInt();
-        cfg.lora_power = pwr;
-        loraSetPower(pwr);
-    }
+    // Step 3 will restore all "lora ..." commands here, unchanged from
+    // the working build: status/send/stream on/off/test/freq/sf/power.
     else if (cmd.length() > 0)
         Serial.printf("[cli] Unknown: '%s'  (try 'help')\n", cmd.c_str());
 }
 
 // ── Core 0 ────────────────────────────────────────────────────────────────
+extern mutex_t spi1_mutex;
+
 void setup() {
+    mutex_init(&spi1_mutex);
+
     Serial.begin(115200);
     delay(2000);
-    Serial.println("\n═══ SEN66 Monitor Phase 2 + LoRa ═══");
+    Serial.println("\n═══ SEN66 Monitor — Step 1: LCD-only ═══");
 
     if (!LittleFS.begin()) { LittleFS.format(); LittleFS.begin(); }
     Serial.println("[fs] mounted");
@@ -189,16 +112,12 @@ void setup() {
     startWiFi();
     setupWebServer();
     initSensor(cfg.fan_cleaning);
+    lcd_display_init();
 
     printHelp();
-    Serial.println("[boot] Complete — signalling core 1");
-    rp2040.fifo.push(0xAA55AA55);
-    // Wait for core 1 to complete radio.begin() before LCD takes SPI1
-    // radio.begin() typically takes ~100ms; 500ms is safe margin
-    delay(500);
-    // LCD init AFTER LoRa core 1 signal — avoids mutex deadlock
-    // during lcd_init() ST7789 reset sequence
-    lcd_display_init();
+    Serial.println("[boot] Complete — core 1 idle (Step 1: no radio)");
+    // Step 3 will re-add: rp2040.fifo.push(0xAA55AA55) to release core 1
+    // once setup1() there is reinstated to actually init the radio.
 }
 
 void loop() {
@@ -225,25 +144,5 @@ void loop() {
         appendLog(latest);
     }
 
-    // ── LoRa stream countdown ticker — one dot per second on a single line,
-    // only while streaming. Line resets (newline) right before next TX.
-    static uint32_t lastCountdownMs = 0;
-    static bool     countdownLineOpen = false;
-    if (loraStreaming && millis() - lastCountdownMs >= 1000) {
-        lastCountdownMs = millis();
-        uint32_t intervalMs = max((uint32_t)cfg.lora_interval_s * 1000UL, 30000UL);
-        uint32_t elapsed = millis() - loraLastTxMs;
-        if (elapsed < intervalMs) {
-            if (!countdownLineOpen) {
-                Serial.print("[lora] next TX ");
-                countdownLineOpen = true;
-            }
-            Serial.print(".");
-        }
-    }
-    if (countdownLineOpen && (!loraStreaming ||
-        millis() - loraLastTxMs >= max((uint32_t)cfg.lora_interval_s * 1000UL, 30000UL))) {
-        Serial.println();
-        countdownLineOpen = false;
-    }
+    // Step 3 will restore the LoRa stream countdown ticker here.
 }
