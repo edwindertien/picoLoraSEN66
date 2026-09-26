@@ -54,7 +54,7 @@ static void printHelp() {
     Serial.println("  net status        — WiFi mode, SSID, IP");
     Serial.println("  net ssid <name>   — set WiFi SSID (saved)");
     Serial.println("  net pass <pwd>    — set WiFi password (saved)");
-    Serial.println("  net reconnect     — apply saved SSID/pass now");
+    Serial.println("  net reconnect     — reboot to apply saved SSID/pass");
     Serial.println(" ── LoRa ──────────────────────────────────────");
     Serial.println("  lora status       — radio state, last ACK");
     Serial.println("  lora send         — TX one sensor packet now");
@@ -155,8 +155,17 @@ static void handleSerial() {
         else Serial.println("[net] Password set but save FAILED");
     }
     else if (cmdL == "net reconnect") {
-        Serial.println("[net] Reconnecting...");
-        startWiFi();
+        // A live re-init (calling startWiFi() again without rebooting)
+        // is unreliable on this platform: the arduino-pico WiFi library
+        // tracks an internal _apMode flag that WiFi.mode() does not
+        // reliably clear once AP mode has been used, causing
+        // WiFi.status()/WiFi.localIP() to keep reporting the AP
+        // interface's state forever, regardless of what mode is
+        // requested afterward (a known upstream issue). A full reboot
+        // is the only way to guarantee a clean WiFi driver state.
+        Serial.println("[net] Rebooting to apply network settings...");
+        delay(200);
+        rp2040.reboot();
     }
     // ── LoRa commands ─────────────────────────────────────────────────────
     else if (cmdL == "lora status") {

@@ -1,7 +1,7 @@
 {
   "node_id": "SEN66-01",
-  "wifi_ssid": "assortimens",
-  "wifi_pass": "t3mpp4ssw0rd",
+  "wifi_ssid": "voorhuis",
+  "wifi_pass": "poepplasbanaan",
   "ap_ssid": "SEN66-Monitor",
   "ap_pass": "sen66pass",
   "interval_s": 10,

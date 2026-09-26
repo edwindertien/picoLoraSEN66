@@ -3,19 +3,16 @@
 #include "globals.h"
 #include <WiFi.h>
 
+// NOTE: startWiFi() must only ever be called once per power cycle (from
+// setup()). The arduino-pico WiFi library tracks an internal _apMode flag
+// that isn't reliably cleared by switching WiFi.mode() at runtime once AP
+// mode has been used — WiFi.status()/WiFi.localIP() can end up permanently
+// reporting the AP interface's state regardless of what's requested
+// afterward (see earlephilhower/arduino-pico#762). A genuine STA retry
+// after an AP fallback is only reliable via a full reboot — see the
+// "net reconnect" CLI command in main.cpp, which calls rp2040.reboot().
 void startWiFi() {
     if (strlen(cfg.wifi_ssid) > 0) {
-        // Only disconnect if we're actually already associated — this is
-        // for the "net reconnect" case where begin() would otherwise be
-        // called on top of an existing connection. Calling disconnect()
-        // unconditionally, even on the very first boot before WiFi has
-        // ever been started, was found to break the initial STA attempt
-        // entirely (fell straight back to AP every time).
-        if (WiFi.status() == WL_CONNECTED) {
-            WiFi.disconnect(true);
-            delay(100);
-        }
-
         Serial.printf("[wifi] Trying STA: %s\n", cfg.wifi_ssid);
         WiFi.mode(WIFI_STA);
         WiFi.begin(cfg.wifi_ssid, cfg.wifi_pass);
