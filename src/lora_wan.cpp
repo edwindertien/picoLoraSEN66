@@ -116,7 +116,7 @@ static void radio_spi_release() {
 static void transmitAndListen(const String& payload) {
     mutex_enter_blocking(&spi1_mutex);
     radio_spi_claim();
-    Serial.printf("[lora] TX %d bytes: %s\n", payload.length(), payload.c_str());
+    if (DBG_MQTT) Serial.printf("[lora] TX %d bytes: %s\n", payload.length(), payload.c_str());
 
     int16_t state = radio.transmit(payload.c_str());
     lastTxMs = millis();

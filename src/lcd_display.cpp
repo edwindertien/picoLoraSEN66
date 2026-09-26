@@ -1,11 +1,10 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // lcd_display.cpp — Waveshare Pico-LCD-1.14 UI for SEN66 monitor
 //
-// STEP 2 of the re-integration plan: LCD-only, now with screen timeout
-// and manual OFF cycling via Button B. Still zero radio interaction —
-// screen_off()/screen_on_page() only touch backlight and state for now.
-// Step 3 will add SPI1 release/reclaim + radio suspend/resume inside
-// those two functions, exactly where marked below.
+// STEP 3 of the re-integration plan: LoRa is back. Coarse-grained bus
+// handoff — screen_on_page() suspends the radio and fully releases SPI1
+// before waking the display; screen_off() releases the LCD's hold on the
+// bus and resumes the radio. Only one side ever touches SPI1 at a time.
 //
 // 240×135 ST7789V. lcd_init() (in lcd_driver.h) owns SPI1 entirely via its
 // own SPI1.begin() call, with a real hardware RST pulse on GP12.
@@ -20,6 +19,7 @@
 #include "sensor.h"
 #include "config.h"
 #include "globals.h"
+#include "lora_wan.h"
 #include <WiFi.h>
 #include <pico/mutex.h>
 #include <math.h>
@@ -38,7 +38,7 @@ mutex_t spi1_mutex;
 
 static LcdPage  currentPage      = LcdPage::SENSOR;
 static bool     pageDirty        = true;
-static bool     screenOn         = true;   // Step 2: now tracked again
+static bool     screenOn         = false;  // device boots as a LoRa node, screen off
 static uint32_t lastActivityMs   = 0;
 static uint32_t lastUpdateMs     = 0;
 static uint32_t lastBtnMs        = 0;
@@ -282,8 +282,32 @@ static void render_wifi() {
     draw_line(120, "sens", buf, DIM);
 }
 
-// NOTE: LoRa status page temporarily removed for Step 1 (LCD-only, no
-// radio). Will be reinstated in Step 3 once the radio is reintroduced.
+static void render_lora() {
+    draw_header("LoRa");
+    char buf[32];
+
+    draw_line(20, "state",
+        lora_is_suspended() ? "suspend" : loraStateStr(),
+        lora_is_suspended() ? DIM :
+        loraState == LoRaState::TX_OK ? OK_COL :
+        loraState == LoRaState::ERROR ? BAD_COL : FG);
+
+    snprintf(buf, sizeof(buf), "%.3f MHz", cfg.lora_freq);
+    draw_line(40, "freq", buf, FG);
+
+    snprintf(buf, sizeof(buf), "SF%u %ddBm", cfg.lora_sf, cfg.lora_power);
+    draw_line(60, "radio", buf, FG);
+
+    snprintf(buf, sizeof(buf), "%lu", loraTxCount);
+    draw_line(80, "TX#", buf, FG);
+
+    draw_line(100, "stream", loraStreaming ? "ON" : "OFF",
+              loraStreaming ? OK_COL : DIM);
+
+    draw_line(120, "ack",
+              loraLastAck.length() > 0 ? loraLastAck.c_str() : "none",
+              loraLastAck.length() > 0 ? OK_COL : DIM, 1);
+}
 
 // ── Screen off — full bus release ────────────────────────────────────────
 // Releases the SPI1 peripheral and tri-states every pin the LCD drives,
@@ -292,6 +316,7 @@ static void render_wifi() {
 // just stopping SPI1 means nothing is left actively driving a shared
 // line while another user of the bus might need it.
 static void screen_off() {
+    if (DBG_BUS) Serial.printf("[lcd] screen_off() at t=%lu\n", millis());
     screenOn    = false;
     currentPage = LcdPage::OFF;
     digitalWrite(LCD_BL, LOW);
@@ -303,8 +328,7 @@ static void screen_off() {
     pinMode(LCD_SCK,  INPUT);
     pinMode(LCD_MOSI, INPUT);
 
-    Serial.println("[lcd] Screen off — SPI1 released, all LCD pins set to INPUT");
-    // Step 3 will add: lora_request_resume() here.
+    lora_request_resume();
 }
 
 // ── Screen on — full bus reclaim + reinit ────────────────────────────────
@@ -315,15 +339,26 @@ static void screen_off() {
 // pin reconfiguration. This is the same lcd_init() called once at boot.
 static void screen_on_page(LcdPage p) {
     if (!screenOn) {
-        // Step 3 will add: lora_request_suspend() + wait for confirmation
-        // HERE, before touching any pins below.
+        if (DBG_BUS) Serial.printf("[lcd] screen_on_page() waking at t=%lu\n", millis());
+        // Ask the radio to suspend and fully release SPI1 before we touch
+        // any pins. This only happens on a button press, so a short
+        // blocking wait is fine — worst case is a TX + ACK window
+        // finishing up, typically well under the timeout below.
+        lora_request_suspend();
+        uint32_t t0 = millis();
+        while (!lora_is_suspended() && millis() - t0 < 3000) {
+            delay(5);
+        }
+        if (!lora_is_suspended()) {
+            // Kept unconditional — a real problem worth always seeing.
+            Serial.println("[lcd] WARNING: radio didn't suspend in time — proceeding anyway");
+        }
 
-        Serial.println("[lcd] Waking — re-running full lcd_init()...");
         lcd_init();
         mutex_enter_blocking(&spi1_mutex);
         lcd_fill(BG);
         mutex_exit(&spi1_mutex);
-        Serial.println("[lcd] Wake complete");
+        if (DBG_BUS) Serial.println("[lcd] Wake complete");
     }
 
     screenOn       = true;
@@ -351,6 +386,7 @@ void lcd_display_update() {
     switch (currentPage) {
         case LcdPage::SENSOR:     render_sensor(); break;
         case LcdPage::WIFI:       render_wifi();   break;
+        case LcdPage::LORA:       render_lora();   break;
         case LcdPage::GRAPH_TEMP:
             draw_header("Temp C");
             render_graph_full(hist_temp, "T",    "C",  COL_ORANGE);  break;
@@ -397,12 +433,6 @@ void lcd_display_handle_buttons() {
         // check ran BEFORE the OFF check, making OFF unreachable.
         uint8_t next = ((uint8_t)currentPage + 1) % (uint8_t)LcdPage::PAGE_COUNT;
 
-        // LORA page isn't rendered yet (Step 3 will restore it) — skip
-        // straight over it so the cycle doesn't land on a blank page.
-        if ((LcdPage)next == LcdPage::LORA) {
-            next = ((uint8_t)LcdPage::LORA + 1) % (uint8_t)LcdPage::PAGE_COUNT;
-        }
-
         if ((LcdPage)next == LcdPage::OFF) {
             screen_off();
         } else {
@@ -412,17 +442,26 @@ void lcd_display_handle_buttons() {
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────
+// Screen starts OFF: the device boots as a LoRa node, backlight dark.
+// We deliberately do NOT call lcd_init() here — screen_on_page() already
+// runs the full init sequence on first wake, so touching the hardware now
+// would just be immediately torn down again. Skipping it means the radio
+// gets a completely untouched SPI1 peripheral as its first-ever user.
 void lcd_display_init() {
     mutex_init(&spi1_mutex);
     buttons_init();  // interrupt-driven — see lcd_buttons.h
 
-    lcd_init();     // owns SPI1 entirely, hardware RST pulse on GP12
-    mutex_enter_blocking(&spi1_mutex);
-    lcd_fill(BG);
-    mutex_exit(&spi1_mutex);
+    pinMode(LCD_CS,   INPUT);
+    pinMode(LCD_DC,   INPUT);
+    pinMode(LCD_RST,  INPUT);
+    pinMode(LCD_SCK,  INPUT);
+    pinMode(LCD_MOSI, INPUT);
+    pinMode(LCD_BL,   OUTPUT);
+    digitalWrite(LCD_BL, LOW);
 
-    pageDirty      = true;
-    screenOn       = true;
+    screenOn       = false;
+    currentPage    = LcdPage::OFF;
+    pageDirty      = false;
     lastActivityMs = millis();
-    Serial.println("[lcd] Initialised — B cycles pages, 20s timeout to OFF (Step 2)");
+    Serial.println("[lcd] Initialised — screen OFF, press B to wake");
 }

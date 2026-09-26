@@ -8,7 +8,7 @@
 // (claim, hardware reset, lcd_init(), use, release) with radio fully out
 // of the picture — isolating whether the LCD's own release/reclaim cycle
 // works at all, independent of any radio interference.
- #define LORA_FULLY_DISABLED
+ //#define LORA_FULLY_DISABLED
 
 // ── LoRa state ────────────────────────────────────────────────────────────
 enum class LoRaState {

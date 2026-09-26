@@ -30,7 +30,7 @@ void appendLog(const Measurement& m) {
 
     // Ring-buffer wrap
     if (logRowCount >= cfg.log_max) {
-        Serial.println("[log] Ring wrap — trimming oldest entries");
+        if (DBG_SENSOR) Serial.println("[log] Ring wrap — trimming oldest entries");
         File src = LittleFS.open("/log.csv", "r");
         File tmp = LittleFS.open("/log.tmp", "w");
         if (!src || !tmp) return;
